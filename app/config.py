@@ -16,6 +16,17 @@ def _int(name: str, default: int) -> int:
 USE_GPU: bool = _bool("OCR_USE_GPU", False)
 LANG: str = os.getenv("OCR_LANG", "en")
 
+#: PaddleOCR 3.x model names. The 3.x default (PP-OCRv6) **segfaults on
+#: aarch64/ARM**; PP-OCRv5 mobile is stable everywhere, fast, and preserves word
+#: spacing (v4 runs the words together). Override on x86 if you want the larger
+#: `_server_` variants for a little more accuracy.
+DET_MODEL: str = os.getenv("OCR_DET_MODEL", "PP-OCRv5_mobile_det")
+REC_MODEL: str = os.getenv("OCR_REC_MODEL", "PP-OCRv5_mobile_rec")
+
+#: Paddle's multi-threaded CPU inference segfaults on ARM, so we pin one thread
+#: by default. On x86 raising this (2-4) is a straight speed win.
+CPU_THREADS: int = _int("OCR_CPU_THREADS", 1)
+
 #: Rasterisation DPI for scanned PDFs. 200 balances OCR accuracy and speed.
 DPI: int = _int("OCR_DPI", 200)
 

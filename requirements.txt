@@ -10,5 +10,9 @@ pillow==11.1.0
 
 # OCR engine (optional at import time — the digital-PDF path works without it).
 # CPU build. See README.md for GPU (paddlepaddle-gpu) instructions.
-paddlepaddle==3.0.0
-paddleocr==2.9.1
+#
+# NOTE: PaddleOCR 3.x's default model (PP-OCRv6) segfaults on aarch64/ARM, and
+# multi-threaded CPU inference does too. `app/config.py` therefore defaults to
+# PP-OCRv5 mobile with cpu_threads=1 — both overridable by env var.
+paddlepaddle==3.2.2
+paddleocr==3.7.0

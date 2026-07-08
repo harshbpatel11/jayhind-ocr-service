@@ -34,9 +34,9 @@ def test_health():
 @pytest.mark.parametrize(
     "name,expected",
     [
-        ("purchase_digital.pdf", "24AABCS1429B1ZX"),   # supplier GSTIN
-        ("sales_digital.pdf", "24AADCK4567L1Z9"),      # customer GSTIN
-        ("interstate_igst.pdf", "27AAGCD8899M1Z4"),    # Maharashtra seller
+        ("purchase_digital.pdf", "24AAHCV3778L1ZQ"),   # supplier GSTIN
+        ("sales_digital.pdf", "24AAACU6278M1ZV"),     # customer GSTIN
+        ("interstate_igst.pdf", "29AAACL1745Q1Z0"),   # Karnataka seller
     ],
 )
 def test_digital_pdf_uses_text_layer_and_finds_gstin(name, expected):
@@ -54,8 +54,8 @@ def test_digital_pdf_preserves_reading_order():
     body = post("purchase_digital.pdf", "application/pdf").json()
     text = body["text"]
     # Header must come before the line items, which come before the totals.
-    assert text.index("TAX INVOICE") < text.index("MS Steel Rod")
-    assert text.index("MS Steel Rod") < text.index("Grand Total")
+    assert text.index("TAX INVOICE") < text.index("Logitech MX Master")
+    assert text.index("Logitech MX Master") < text.index("Grand Total")
 
 
 def test_tokens_carry_bounding_boxes():

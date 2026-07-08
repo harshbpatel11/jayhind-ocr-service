@@ -16,9 +16,22 @@ See `INVOICE_SCANNING_PLAN.md` §3.1 at the project root.
 | PDF **without** a text layer (scan) | `ocr` | `pymupdf` rasterises pages → PaddleOCR |
 | Image (JPG/PNG/WEBP) | `ocr` | PaddleOCR |
 
-PaddleOCR runs with `use_angle_cls=True` so rotated/upside-down scans are
-handled. Tokens are sorted into reading order (top-to-bottom, then
+PaddleOCR runs with `use_textline_orientation=True` so rotated/upside-down scan
+lines are handled. Tokens are sorted into reading order (top-to-bottom, then
 left-to-right, with a line-clustering tolerance) before the text is joined.
+
+Doc-orientation and doc-unwarping pre-models are **disabled**: invoices are
+already page-shaped, those models cost seconds per page, and they add crash
+surface on ARM. Line-level rotation is still corrected.
+
+> ### ⚠️ ARM / aarch64 note
+> PaddleOCR 3.x defaults to the **PP-OCRv6** models, which **segfault on ARM**
+> (verified on `aarch64`, paddlepaddle 3.2.2). Multi-threaded CPU inference
+> segfaults too. This service therefore defaults to **PP-OCRv5 mobile** with
+> **`cpu_threads=1`**, which is stable on both ARM and x86 and preserves word
+> spacing (PP-OCRv4 runs words together). On x86 you may raise `OCR_CPU_THREADS`
+> to 2–4 for a straight speed win, and can switch to the larger `_server_`
+> models via `OCR_DET_MODEL` / `OCR_REC_MODEL`.
 
 ## Setup (CPU — recommended)
 
@@ -67,6 +80,9 @@ Mount `/root/.paddleocr` so model weights survive container restarts.
 |---|---|---|
 | `OCR_USE_GPU` | `false` | Use the CUDA PaddlePaddle build |
 | `OCR_LANG` | `en` | PaddleOCR language pack |
+| `OCR_DET_MODEL` | `PP-OCRv5_mobile_det` | Text-detection model (see ARM note) |
+| `OCR_REC_MODEL` | `PP-OCRv5_mobile_rec` | Text-recognition model |
+| `OCR_CPU_THREADS` | `1` | Paddle CPU threads (>1 segfaults on ARM) |
 | `OCR_DPI` | `200` | Rasterisation DPI for scanned PDFs |
 | `OCR_MAX_PAGES` | `10` | Hard cap on pages processed per document |
 | `OCR_TEXT_LAYER_MIN_CHARS` | `120` | Chars/page needed to treat a PDF as digital |

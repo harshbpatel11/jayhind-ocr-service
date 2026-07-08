@@ -11,8 +11,11 @@ Produces (in tests/fixtures/):
   clean_scan.png           rasterised purchase invoice (clean 200-DPI scan)
   low_quality_photo.png    same, downscaled + blurred + rotated 3°
 
-Company GSTIN in the fixtures is 24AAACT2727Q1ZW (Gujarat, state code 24) —
-set the same value in Company Configuration to exercise direction detection.
+The parties and products below deliberately mirror the **seeded dev database**
+(`site_configurations.gstNumber`, seeded party users, seeded products) so the
+whole pipeline — direction detection, party matching, item matching, duplicate
+detection — can be asserted end-to-end by `backend/scripts/qa-invoice-match.ts`.
+Company GSTIN 24AJGPP6816J1ZY is Gujarat (GST state code 24).
 """
 import pathlib
 import subprocess
@@ -20,21 +23,27 @@ import sys
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
-COMPANY = dict(name="Jayhind Traders Pvt Ltd", gstin="24AAACT2727Q1ZW", state="Gujarat",
+# Mirrors site_configurations in the seeded dev DB.
+COMPANY = dict(name="Jayhind", gstin="24AJGPP6816J1ZY", state="Gujarat",
                address="14 Ashram Road, Ahmedabad, Gujarat 380009")
-SUPPLIER = dict(name="Shree Steel Supplies", gstin="24AABCS1429B1ZX", state="Gujarat",
+# Seeded party users (userKind='party') — matching must find these by GSTIN.
+SUPPLIER = dict(name="VIJAY SALES", gstin="24AAHCV3778L1ZQ", state="Gujarat",
                 address="Plot 22, GIDC Estate, Vadodara, Gujarat 390010")
-CUSTOMER = dict(name="Kiran Enterprises", gstin="24AADCK4567L1Z9", state="Gujarat",
+CUSTOMER = dict(name="UNICORN INFOSOLUTIONS PRIVATE LIMITED", gstin="24AAACU6278M1ZV", state="Gujarat",
                 address="9 MG Road, Surat, Gujarat 395003")
-MAHARASHTRA = dict(name="Deccan Metals Ltd", gstin="27AAGCD8899M1Z4", state="Maharashtra",
-                   address="88 Andheri East, Mumbai, Maharashtra 400069")
+# Seeded party in Karnataka (GST code 29) — exercises the inter-state IGST path.
+INTERSTATE = dict(name="LG ELECTRONICS INDIA LIMITED", gstin="29AAACL1745Q1Z0", state="Karnataka",
+                  address="88 Whitefield Road, Bengaluru, Karnataka 560066")
+# Deliberately absent from the party master.
 UNKNOWN = dict(name="Nova Packaging LLP", gstin="24AAJCN7788K1ZQ", state="Gujarat",
                address="Survey 41, Sanand, Gujarat 382110")
 
-STEEL_LINES = [
-    ("MS Steel Rod 12mm", "7214", 100, "PCS", 250.00, 18),
-    ("Galvanised Sheet 2mm", "7210", 40, "PCS", 780.00, 18),
+# Seeded products — item matching must resolve these by name.
+KNOWN_LINES = [
+    ("Logitech MX Master 3S Mouse", "8471", 100, "PCS", 250.00, 18),
+    ("Dell WM126 Wireless Mouse", "8471", 40, "PCS", 780.00, 18),
 ]
+# Absent from the product master — exercises the "item not found" path.
 UNKNOWN_LINES = [
     ("Corrugated Carton 18x12x10", "4819", 500, "PCS", 34.50, 12),
     ("Bubble Wrap Roll 1m x 100m", "3923", 15, "ROL", 890.00, 18),
@@ -154,10 +163,10 @@ def main() -> None:
     FIXTURES.mkdir(parents=True, exist_ok=True)
 
     specs = [
-        ("purchase_digital.pdf", SUPPLIER, COMPANY, "SS/2026/0412", "05-07-2026", STEEL_LINES, False),
-        ("sales_digital.pdf", COMPANY, CUSTOMER, "JT/2026/1188", "06-07-2026", STEEL_LINES, False),
-        ("interstate_igst.pdf", MAHARASHTRA, COMPANY, "DM-2026-771", "04-07-2026", STEEL_LINES, True),
-        ("unknown_party.pdf", UNKNOWN, COMPANY, "NP/26-27/019", "07-07-2026", STEEL_LINES, False),
+        ("purchase_digital.pdf", SUPPLIER, COMPANY, "SS/2026/0412", "05-07-2026", KNOWN_LINES, False),
+        ("sales_digital.pdf", COMPANY, CUSTOMER, "JT/2026/1188", "06-07-2026", KNOWN_LINES, False),
+        ("interstate_igst.pdf", INTERSTATE, COMPANY, "LG-2026-771", "04-07-2026", KNOWN_LINES, True),
+        ("unknown_party.pdf", UNKNOWN, COMPANY, "NP/26-27/019", "07-07-2026", KNOWN_LINES, False),
         ("unknown_items.pdf", SUPPLIER, COMPANY, "SS/2026/0433", "07-07-2026", UNKNOWN_LINES, False),
     ]
     for name, seller, buyer, number, date, lines, interstate in specs:

@@ -1,6 +1,8 @@
 """Extraction engines: digital-PDF text layer (fast path) and PaddleOCR."""
 import io
+import math
 import time
+from statistics import median
 from typing import Dict, List, Optional, Tuple
 
 from . import config
@@ -27,16 +29,26 @@ def ocr_available() -> bool:
 
 def _get_ocr_engine():
     """Lazily build the singleton PaddleOCR engine (thread-safe enough: uvicorn
-    workers are single-threaded per process, and construction is idempotent)."""
+    workers are single-threaded per process, and construction is idempotent).
+
+    Model weights download on first use, not at import, so start-up stays fast.
+    Doc-orientation and unwarping pre-models are disabled: invoices are already
+    page-shaped, the models cost seconds per page, and they add ARM crash surface.
+    Line-level rotation is still handled by `use_textline_orientation`.
+    """
     global _ocr_engine
     if _ocr_engine is None:
         from paddleocr import PaddleOCR
 
         _ocr_engine = PaddleOCR(
-            use_angle_cls=True,  # handles rotated / upside-down scans
             lang=config.LANG,
-            use_gpu=config.USE_GPU,
-            show_log=False,
+            device="gpu" if config.USE_GPU else "cpu",
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=True,  # rotated / upside-down scan lines
+            text_detection_model_name=config.DET_MODEL,
+            text_recognition_model_name=config.REC_MODEL,
+            cpu_threads=config.CPU_THREADS,
         )
     return _ocr_engine
 
@@ -95,6 +107,58 @@ def _extract_pdf_text(pdf) -> List[Dict]:
 # ── OCR path ────────────────────────────────────────────────────────────────
 
 
+def _estimate_skew(polys) -> float:
+    """Dominant text angle (radians) from the top edge of each detected line box.
+
+    Photographed invoices are never square to the camera. A 3° skew spreads one
+    text line across ~70px of a 1400px-wide page — far more than a line's height
+    — so grouping tokens into lines by their y coordinate falls apart unless the
+    page is de-skewed first. The median is used so a few odd boxes can't drag it.
+    """
+    angles = []
+    for poly in polys:
+        (x0, y0), (x1, y1) = (float(poly[0][0]), float(poly[0][1])), (float(poly[1][0]), float(poly[1][1]))
+        dx, dy = x1 - x0, y1 - y0
+        if abs(dx) < 5:  # too short to give a reliable angle
+            continue
+        angle = math.atan2(dy, dx)
+        if abs(angle) < math.radians(15):  # ignore vertical/garbage boxes
+            angles.append(angle)
+    return median(angles) if angles else 0.0
+
+
+def _rotate(point, angle: float, cx: float, cy: float):
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    x, y = point[0] - cx, point[1] - cy
+    return (x * cos_a - y * sin_a + cx, x * sin_a + y * cos_a + cy)
+
+
+def _polygons_to_tokens(texts, scores, polys, size: Tuple[float, float]) -> List[Dict]:
+    """PaddleOCR returns a quadrilateral per text line; we need axis-aligned boxes.
+
+    Coordinates are de-skewed about the page centre first, so downstream line
+    grouping and the seller/buyer column split work on rotated scans.
+    """
+    skew = _estimate_skew(polys)
+    cx, cy = size[0] / 2.0, size[1] / 2.0
+
+    tokens: List[Dict] = []
+    for text, score, poly in zip(texts, scores, polys):
+        points = [(float(p[0]), float(p[1])) for p in poly]
+        if abs(skew) > math.radians(0.3):
+            points = [_rotate(p, -skew, cx, cy) for p in points]
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        tokens.append(
+            {
+                "text": text,
+                "bbox": [min(xs), min(ys), max(xs), max(ys)],
+                "confidence": float(score),
+            }
+        )
+    return tokens
+
+
 def _run_ocr(image_bytes: bytes, page_index: int, size: Tuple[float, float]) -> Dict:
     if not _OCR_IMPORTABLE:
         raise OcrUnavailable(
@@ -102,26 +166,28 @@ def _run_ocr(image_bytes: bytes, page_index: int, size: Tuple[float, float]) -> 
             "Install the paddlepaddle/paddleocr requirements to process scans and images."
         )
     engine = _get_ocr_engine()
-    # PaddleOCR accepts raw bytes decoded to ndarray; go through PIL so we
-    # normalise WEBP/PNG-with-alpha into plain RGB.
+
+    # Normalise WEBP / PNG-with-alpha into plain RGB before handing to Paddle.
     import numpy as np
     from PIL import Image
 
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    result = engine.ocr(np.array(image), cls=True)
+    array = np.array(image)
 
-    tokens: List[Dict] = []
-    # PaddleOCR returns [[ [box, (text, score)], ... ]] — one list per image.
-    for line in (result or [[]])[0] or []:
-        box, (text, score) = line[0], line[1]
-        xs = [point[0] for point in box]
-        ys = [point[1] for point in box]
-        tokens.append(
-            {
-                "text": text,
-                "bbox": [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))],
-                "confidence": float(score),
-            }
+    # PaddleOCR 3.x: `predict()` returns one result dict per image, carrying
+    # parallel `rec_texts` / `rec_scores` / `rec_polys` lists. (2.x's `ocr(cls=)`
+    # returned a nested [[box, (text, score)]] structure — handled as a fallback.)
+    if hasattr(engine, "predict"):
+        result = engine.predict(input=array)
+        if not result:
+            return _empty_page(page_index, size)
+        page = result[0]
+        tokens = _polygons_to_tokens(page["rec_texts"], page["rec_scores"], page["rec_polys"], size)
+    else:  # pragma: no cover - PaddleOCR 2.x
+        legacy = engine.ocr(array, cls=True)
+        rows = (legacy or [[]])[0] or []
+        tokens = _polygons_to_tokens(
+            [row[1][0] for row in rows], [row[1][1] for row in rows], [row[0] for row in rows], size
         )
 
     return {
@@ -132,6 +198,10 @@ def _run_ocr(image_bytes: bytes, page_index: int, size: Tuple[float, float]) -> 
         "tokens": tokens,
         "tables": [],
     }
+
+
+def _empty_page(page_index: int, size: Tuple[float, float]) -> Dict:
+    return {"index": page_index, "width": float(size[0]), "height": float(size[1]), "text": "", "tokens": [], "tables": []}
 
 
 def _rasterise_pdf(data: bytes) -> List[Tuple[bytes, Tuple[float, float]]]:
