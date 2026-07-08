@@ -1,0 +1,14 @@
+# Invoice Scanning — OCR sidecar service
+#
+# Core (always required)
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+pdfplumber==0.11.5          # digital-PDF text layer + word boxes
+pymupdf==1.25.2             # page rasterisation for scanned PDFs
+pillow==11.1.0
+
+# OCR engine (optional at import time — the digital-PDF path works without it).
+# CPU build. See README.md for GPU (paddlepaddle-gpu) instructions.
+paddlepaddle==3.0.0
+paddleocr==2.9.1
