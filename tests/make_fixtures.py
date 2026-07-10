@@ -8,6 +8,7 @@ Produces (in tests/fixtures/):
   interstate_igst.pdf      inter-state invoice using IGST
   unknown_party.pdf        supplier GSTIN not in the party master
   unknown_items.pdf        line items not in the product master
+  stacked_purchase.pdf     stacked (not side-by-side) parties, qualified title
   clean_scan.png           rasterised purchase invoice (clean 200-DPI scan)
   low_quality_photo.png    same, downscaled + blurred + rotated 3°
 
@@ -115,6 +116,53 @@ def _build_html(seller, buyer, number, date, lines, interstate=False):
     </body></html>"""
 
 
+def _build_stacked_html(seller, buyer, number, date, lines):
+    """A **stacked** invoice: parties one under the other, the title carries a
+    qualifier ("PURCHASE TAX INVOICE"), the parties are introduced by inline
+    "Supplier:"/"Buyer:" markers, and the taxable total is labelled "Subtotal".
+
+    Every one of those is a layout the side-by-side fixtures above never exercise,
+    and each one broke the parser at least once. Modelled on a real user invoice.
+    """
+    rows, taxable_total, tax_total = [], 0.0, 0.0
+    for index, (desc, hsn, qty, _unit, rate, gst) in enumerate(lines, start=1):
+        taxable = qty * rate
+        taxable_total += taxable
+        tax_total += taxable * gst / 100
+        rows.append(
+            f"<tr><td>{index}</td><td>{desc}</td><td>{hsn}</td><td class='r'>{qty}</td>"
+            f"<td class='r'>{_money(rate)}</td><td class='r'>{gst}%</td><td class='r'>{_money(taxable)}</td></tr>"
+        )
+    half = tax_total / 2
+
+    return f"""<!doctype html><html><head><meta charset="utf-8"><style>
+      body {{ font-family: DejaVu Sans, Arial, sans-serif; font-size: 11px; margin: 40px 60px; }}
+      h1 {{ font-size: 18px; text-align: center; margin: 0 0 16px; }}
+      .block {{ margin-bottom: 10px; }}
+      table.items {{ width: 100%; border-collapse: collapse; margin-top: 8px; }}
+      table.items th, table.items td {{ border: 1px solid #333; padding: 4px 6px; }}
+      table.items th {{ background: #eee; }}
+      .r {{ text-align: right; }}
+    </style></head><body>
+      <h1>PURCHASE TAX INVOICE</h1>
+      <div class="block"><b>Supplier:</b> {seller['name']}<br>{seller['address']}<br>
+          GSTIN: {seller['gstin']}<br>PAN: {seller['gstin'][2:12]}</div>
+      <div class="block"><b>Buyer:</b> {buyer['name']}<br>{buyer['address']}<br>
+          GSTIN: {buyer['gstin']}</div>
+      <div>Invoice No: {number}<br>Invoice Date: {date}<br>Place of Supply: {seller['state']}</div>
+      <table class="items">
+        <tr><th>Sr</th><th>Description</th><th>HSN</th><th>Qty</th><th>Rate</th><th>Tax %</th><th>Amount</th></tr>
+        {''.join(rows)}
+        <tr><td colspan="6" class="r">Subtotal</td><td class="r">{_money(taxable_total)}</td></tr>
+        <tr><td colspan="6" class="r">CGST 9%</td><td class="r">{_money(half)}</td></tr>
+        <tr><td colspan="6" class="r">SGST 9%</td><td class="r">{_money(half)}</td></tr>
+        <tr><td colspan="6" class="r">Grand Total</td><td class="r">{_money(taxable_total + tax_total)}</td></tr>
+      </table>
+      <p>Bank: State Bank of India | A/C: 12345678901 | IFSC: SBIN0001234</p>
+      <p>Authorized Signatory ____________________</p>
+    </body></html>"""
+
+
 def _write_pdf(html: str, path: pathlib.Path) -> None:
     """Render HTML → PDF. Prefers weasyprint; falls back to a plain-text PDF."""
     try:
@@ -173,6 +221,10 @@ def main() -> None:
         path = FIXTURES / name
         _write_pdf(_build_html(seller, buyer, number, date, lines, interstate), path)
         print(f"  wrote {path.name}")
+
+    stacked = FIXTURES / "stacked_purchase.pdf"
+    _write_pdf(_build_stacked_html(SUPPLIER, COMPANY, "SS/2026/0455", "08-07-2026", KNOWN_LINES), stacked)
+    print(f"  wrote {stacked.name}")
 
     try:
         _rasterise(FIXTURES / "purchase_digital.pdf", FIXTURES / "clean_scan.png")

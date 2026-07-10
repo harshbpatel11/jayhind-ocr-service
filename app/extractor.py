@@ -159,7 +159,30 @@ def _polygons_to_tokens(texts, scores, polys, size: Tuple[float, float]) -> List
     return tokens
 
 
-def _run_ocr(image_bytes: bytes, page_index: int, size: Tuple[float, float]) -> Dict:
+def _fit_for_ocr(image):
+    """Scale an image so its longest side lands inside the band Paddle reads best.
+
+    Text much under ~20px tall recognises poorly, so small screenshots are
+    upscaled; oversized photos are downscaled because inference cost and peak
+    memory grow with pixel count while accuracy does not. Aspect ratio is kept, so
+    the token boxes stay proportional to the page dimensions we report.
+    """
+    from PIL import Image
+
+    longest = max(image.size)
+    if longest < config.MIN_IMAGE_SIDE:
+        scale = config.MIN_IMAGE_SIDE / longest
+    elif longest > config.MAX_IMAGE_SIDE:
+        scale = config.MAX_IMAGE_SIDE / longest
+    else:
+        return image
+    resized = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    return image.resize(resized, Image.LANCZOS)
+
+
+def _run_ocr(image_bytes: bytes, page_index: int) -> Dict:
+    """OCR one page image. The page's reported size is the size actually inferred
+    on, so token boxes and page dimensions always share one coordinate space."""
     if not _OCR_IMPORTABLE:
         raise OcrUnavailable(
             f"PaddleOCR is not installed in this environment ({_ocr_import_error}). "
@@ -171,7 +194,8 @@ def _run_ocr(image_bytes: bytes, page_index: int, size: Tuple[float, float]) -> 
     import numpy as np
     from PIL import Image
 
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image = _fit_for_ocr(Image.open(io.BytesIO(image_bytes)).convert("RGB"))
+    size = (float(image.width), float(image.height))
     array = np.array(image)
 
     # PaddleOCR 3.x: `predict()` returns one result dict per image, carrying
@@ -192,8 +216,8 @@ def _run_ocr(image_bytes: bytes, page_index: int, size: Tuple[float, float]) -> 
 
     return {
         "index": page_index,
-        "width": float(size[0]),
-        "height": float(size[1]),
+        "width": size[0],
+        "height": size[1],
         "text": tokens_to_text(tokens),
         "tokens": tokens,
         "tables": [],
@@ -204,17 +228,13 @@ def _empty_page(page_index: int, size: Tuple[float, float]) -> Dict:
     return {"index": page_index, "width": float(size[0]), "height": float(size[1]), "text": "", "tokens": [], "tables": []}
 
 
-def _rasterise_pdf(data: bytes) -> List[Tuple[bytes, Tuple[float, float]]]:
+def _rasterise_pdf(data: bytes) -> List[bytes]:
     import fitz  # pymupdf
 
     zoom = config.DPI / 72.0
     matrix = fitz.Matrix(zoom, zoom)
-    rendered: List[Tuple[bytes, Tuple[float, float]]] = []
     with fitz.open(stream=data, filetype="pdf") as doc:
-        for page in list(doc)[: config.MAX_PAGES]:
-            pixmap = page.get_pixmap(matrix=matrix)
-            rendered.append((pixmap.tobytes("png"), (pixmap.width, pixmap.height)))
-    return rendered
+        return [page.get_pixmap(matrix=matrix).tobytes("png") for page in list(doc)[: config.MAX_PAGES]]
 
 
 # ── Public entry point ──────────────────────────────────────────────────────
@@ -239,17 +259,10 @@ def extract(data: bytes, content_type: str) -> Dict:
                 method = "ocr"
 
         if pages is None:  # scanned PDF → rasterise then OCR
-            pages = [
-                _run_ocr(image, index, size)
-                for index, (image, size) in enumerate(_rasterise_pdf(data))
-            ]
+            pages = [_run_ocr(image, index) for index, image in enumerate(_rasterise_pdf(data))]
 
     elif content_type in config.IMAGE_MIME_TYPES:
-        from PIL import Image
-
-        with Image.open(io.BytesIO(data)) as probe:
-            size = probe.size
-        pages = [_run_ocr(data, 0, size)]
+        pages = [_run_ocr(data, 0)]
         method = "ocr"
 
     else:

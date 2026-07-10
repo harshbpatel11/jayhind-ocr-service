@@ -33,6 +33,18 @@ DPI: int = _int("OCR_DPI", 200)
 #: Hard cap on pages processed per document (protects the worker from a 200-page scan).
 MAX_PAGES: int = _int("OCR_MAX_PAGES", 10)
 
+#: Every image is scaled so its longest side lands inside this band before
+#: inference. Below ~1400px the text on an A4 invoice is too small to recognise
+#: reliably; above ~2600px inference cost and peak memory climb with no accuracy
+#: gain — and a full-resolution phone photo is precisely what exhausts the worker
+#: on ARM (the same place `OCR_CPU_THREADS > 1` crashes).
+MIN_IMAGE_SIDE: int = _int("OCR_MIN_IMAGE_SIDE", 1400)
+MAX_IMAGE_SIDE: int = _int("OCR_MAX_IMAGE_SIDE", 2600)
+
+#: Hard cap on an uploaded document. The backend caps uploads too, but the sidecar
+#: must protect itself — it is the process that would run out of memory.
+MAX_UPLOAD_BYTES: int = _int("OCR_MAX_UPLOAD_BYTES", 25 * 1024 * 1024)
+
 #: Chars per page required before a PDF is treated as "digital" (has a text layer).
 #: Scanned PDFs often carry a few stray characters (page numbers, producer marks),
 #: so a small non-zero threshold is safer than `> 0`.

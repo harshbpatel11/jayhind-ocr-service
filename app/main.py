@@ -29,6 +29,13 @@ async def extract_document(file: UploadFile = File(...)) -> ExtractResponse:
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Empty file")
+    if len(data) > config.MAX_UPLOAD_BYTES:
+        # 413 is a 4xx, so the backend treats it as terminal for this document
+        # rather than retrying a file that will never fit.
+        raise HTTPException(
+            status_code=413,
+            detail=f"Document is larger than {config.MAX_UPLOAD_BYTES // (1024 * 1024)} MB",
+        )
 
     content_type = (file.content_type or "").lower()
     try:
