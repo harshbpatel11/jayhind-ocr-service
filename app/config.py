@@ -16,19 +16,41 @@ def _int(name: str, default: int) -> int:
 USE_GPU: bool = _bool("OCR_USE_GPU", False)
 LANG: str = os.getenv("OCR_LANG", "en")
 
-#: PaddleOCR 3.x model names. The 3.x default (PP-OCRv6) **segfaults on
-#: aarch64/ARM**; PP-OCRv5 mobile is stable everywhere, fast, and preserves word
-#: spacing (v4 runs the words together). Override on x86 if you want the larger
-#: `_server_` variants for a little more accuracy.
-DET_MODEL: str = os.getenv("OCR_DET_MODEL", "PP-OCRv5_mobile_det")
-REC_MODEL: str = os.getenv("OCR_REC_MODEL", "PP-OCRv5_mobile_rec")
+#: Which extraction engine to use for images / scanned PDFs:
+#:   "classic" — PP-OCRv5 detection + recognition (fast, proven on ARM).
+#:   "vl"      — PaddleOCR-VL, a local ~0.9B vision-language model that reads hard
+#:               scans/photos far better but is much slower on CPU. Falls back to
+#:               classic automatically if it is unavailable or errors on a page.
+#: Digital PDFs always take the exact text-layer path regardless of this setting.
+OCR_ENGINE: str = os.getenv("OCR_ENGINE", "classic").strip().lower()
+
+#: Model tier for the classic engine:
+#:   "fast" (default) — PP-OCRv5 **mobile** models + 200 DPI. Stable and quick on
+#:                aarch64/ARM (~13-19s/page).
+#:   "accurate"       — PP-OCRv5 **server** models + 300 DPI. Better recognition,
+#:                but MEASURED at >2 min/page on this 4-core ARM/CPU box and heavy
+#:                on RAM, so it is opt-in rather than the default here. Prefer it on
+#:                x86 / GPU / many-core hosts (set OCR_MODEL_TIER=accurate).
+#: NB: PaddleOCR 3.x's PP-OCRv6 default **segfaults on ARM**, so we never use it.
+#: (Most invoices are digital PDFs and take the exact text-layer path — no model
+#: at all — so the tier only affects photographed/scanned inputs.)
+OCR_MODEL_TIER: str = os.getenv("OCR_MODEL_TIER", "fast").strip().lower()
+_ACCURATE = OCR_MODEL_TIER == "accurate"
+
+#: Explicit model overrides win over the tier default.
+DET_MODEL: str = os.getenv("OCR_DET_MODEL") or ("PP-OCRv5_server_det" if _ACCURATE else "PP-OCRv5_mobile_det")
+REC_MODEL: str = os.getenv("OCR_REC_MODEL") or ("PP-OCRv5_server_rec" if _ACCURATE else "PP-OCRv5_mobile_rec")
 
 #: Paddle's multi-threaded CPU inference segfaults on ARM, so we pin one thread
 #: by default. On x86 raising this (2-4) is a straight speed win.
 CPU_THREADS: int = _int("OCR_CPU_THREADS", 1)
 
-#: Rasterisation DPI for scanned PDFs. 200 balances OCR accuracy and speed.
-DPI: int = _int("OCR_DPI", 200)
+#: Rasterisation DPI for scanned PDFs. 300 on the accurate tier (sharper glyphs),
+#: 200 on the fast tier.
+DPI: int = _int("OCR_DPI", 300 if _ACCURATE else 200)
+
+#: PaddleOCR-VL model name (used only when OCR_ENGINE="vl").
+VL_REC_MODEL: str = os.getenv("OCR_VL_MODEL", "PaddleOCR-VL-0.9B")
 
 #: Hard cap on pages processed per document (protects the worker from a 200-page scan).
 MAX_PAGES: int = _int("OCR_MAX_PAGES", 10)

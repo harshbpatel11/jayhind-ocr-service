@@ -16,3 +16,9 @@ pillow==11.1.0
 # PP-OCRv5 mobile with cpu_threads=1 — both overridable by env var.
 paddlepaddle==3.2.2
 paddleocr==3.7.0
+
+# OPTIONAL — PaddleOCR-VL local vision-language OCR engine (OCR_ENGINE=vl).
+# Adds the VLM backend; weights (~1.8 GB) download on first use. Install with:
+#     pip install "paddlex[ocr]==3.7.2"
+# ⚠️ Segfaults on aarch64/CPU inference — x86 / GPU hosts only. The default engine
+# is "classic" (PP-OCRv5), so this is NOT required for normal operation.

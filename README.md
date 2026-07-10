@@ -1,10 +1,16 @@
 # OCR Service — Invoice Scanning sidecar
 
-A small FastAPI service that turns an uploaded invoice (PDF or image) into
-**reading-order text plus per-token bounding boxes and confidences**. It is the
-only place PaddleOCR lives; the NestJS backend talks to it over HTTP so the
-extraction engine can be swapped later (e.g. for a vision LLM) without touching
-the rest of the pipeline.
+A FastAPI service that turns an uploaded invoice (PDF or image) into a
+**structured invoice** (supplier & buyer, line items, taxes, totals) — fully
+offline, no data leaves the host. It does two things:
+
+- **Extraction** — reading-order text + per-token boxes (`POST /extract`).
+- **Structuring** — a geometry-first, rules-only parser converts that into the
+  `ExtractedInvoice` the NestJS backend consumes (`POST /parse`). This logic used
+  to live in TypeScript; it now lives here (`app/structuring/`) so it can read
+  token **geometry** directly, which is what makes party-name / line-item
+  detection robust across invoice layouts. Node only calls `/parse` and matches
+  the result against the DB.
 
 See `INVOICE_SCANNING_PLAN.md` §3.1 at the project root.
 
@@ -24,14 +30,30 @@ Doc-orientation and doc-unwarping pre-models are **disabled**: invoices are
 already page-shaped, those models cost seconds per page, and they add crash
 surface on ARM. Line-level rotation is still corrected.
 
+### OCR engines & tiers
+
+`OCR_ENGINE` picks the engine for images / scanned PDFs (digital PDFs always use
+the exact text-layer path, so this only affects photographed/scanned inputs):
+
+- **`classic`** (default) — PP-OCRv5 detection + recognition. Two model tiers via
+  `OCR_MODEL_TIER`:
+  - `fast` (default) — **PP-OCRv5 mobile** + 200 DPI. Stable and quick (~13–19s/page).
+  - `accurate` — **PP-OCRv5 server** + 300 DPI. Better recognition, but measured
+    **>2 min/page on aarch64/CPU** — prefer it on x86 / GPU / many-core hosts.
+- **`vl`** — **PaddleOCR-VL**, a local ~0.9B vision-language model (needs the
+  `paddlex[ocr]` extra; weights ~1.8 GB). Best on hard scans, but see the ARM note.
+
 > ### ⚠️ ARM / aarch64 note
-> PaddleOCR 3.x defaults to the **PP-OCRv6** models, which **segfault on ARM**
-> (verified on `aarch64`, paddlepaddle 3.2.2). Multi-threaded CPU inference
-> segfaults too. This service therefore defaults to **PP-OCRv5 mobile** with
-> **`cpu_threads=1`**, which is stable on both ARM and x86 and preserves word
-> spacing (PP-OCRv4 runs words together). On x86 you may raise `OCR_CPU_THREADS`
-> to 2–4 for a straight speed win, and can switch to the larger `_server_`
-> models via `OCR_DET_MODEL` / `OCR_REC_MODEL`.
+> On `aarch64` (paddlepaddle 3.2.2) three things crash and are avoided:
+> - PaddleOCR 3.x's default **PP-OCRv6** models **segfault** → we pin **PP-OCRv5**.
+> - **Multi-threaded** CPU inference segfaults → `cpu_threads=1`.
+> - **`OCR_ENGINE=vl` (PaddleOCR-VL) segfaults on inference** on this ARM/CPU box.
+>   A SIGSEGV crashes the worker and cannot be caught, so **do not enable `vl` on
+>   ARM** — run it on an x86 / GPU host. The engine is wired (with a fallback for
+>   non-crash errors) for exactly those environments.
+>
+> On x86 you may raise `OCR_CPU_THREADS` to 2–4, set `OCR_MODEL_TIER=accurate`,
+> or `OCR_ENGINE=vl`.
 
 ## Setup (CPU — recommended)
 
@@ -78,12 +100,14 @@ Mount `/root/.paddleocr` so model weights survive container restarts.
 
 | Env var | Default | Meaning |
 |---|---|---|
+| `OCR_ENGINE` | `classic` | `classic` (PP-OCRv5) or `vl` (PaddleOCR-VL — x86/GPU only, see ARM note) |
+| `OCR_MODEL_TIER` | `fast` | `fast` (mobile, 200 DPI) or `accurate` (server, 300 DPI) |
 | `OCR_USE_GPU` | `false` | Use the CUDA PaddlePaddle build |
 | `OCR_LANG` | `en` | PaddleOCR language pack |
-| `OCR_DET_MODEL` | `PP-OCRv5_mobile_det` | Text-detection model (see ARM note) |
-| `OCR_REC_MODEL` | `PP-OCRv5_mobile_rec` | Text-recognition model |
+| `OCR_DET_MODEL` | tier default | Override the text-detection model |
+| `OCR_REC_MODEL` | tier default | Override the text-recognition model |
 | `OCR_CPU_THREADS` | `1` | Paddle CPU threads (>1 segfaults on ARM) |
-| `OCR_DPI` | `200` | Rasterisation DPI for scanned PDFs |
+| `OCR_DPI` | tier default | Rasterisation DPI for scanned PDFs |
 | `OCR_MAX_PAGES` | `10` | Hard cap on pages processed per document |
 | `OCR_TEXT_LAYER_MIN_CHARS` | `120` | Chars/page needed to treat a PDF as digital |
 
@@ -122,6 +146,35 @@ The backend reaches the service at `OCR_SERVICE_URL` (default
 `confidence` is `1.0` for every token on the `pdf-text` path (the characters are
 exact, not recognised). Errors return `{"detail": "..."}` with 400 (bad file),
 415 (unsupported type) or 503 (OCR engine unavailable).
+
+### `POST /parse` (multipart, field `file`) — the production endpoint
+
+Extraction **+ structuring**: returns the `ExtractedInvoice` the backend consumes.
+
+```json
+{
+  "method": "pdf-text",
+  "structuringMethod": "rules",
+  "pageCount": 1,
+  "durationMs": 96,
+  "text": "TAX INVOICE\n...",
+  "invoice": {
+    "schemaVersion": 1,
+    "seller": { "name": "VIJAY SALES", "gstin": "24AAHCV3778L1ZQ", "stateName": "Gujarat", "pan": "AAHCV3778L", "address": "..." },
+    "buyer":  { "name": "Jayhind", "gstin": "24AJGPP6816J1ZY", "...": "..." },
+    "invoice": { "number": "SS/2026/0412", "date": "2026-07-05" },
+    "lineItems": [ { "description": "...", "hsnSac": "8471", "quantity": 100, "rate": 250, "taxableAmount": 25000, "gstRate": 18, "cgstAmount": 2250, "sgstAmount": 2250, "igstAmount": null, "confidence": 1.0 } ],
+    "taxSummary": [ { "rate": 18, "taxableAmount": 56200, "cgst": 5058, "sgst": 5058, "igst": 0 } ],
+    "totals": { "taxableTotal": 56200, "taxTotal": 10116, "roundOff": 0, "grandTotal": 66316, "amountInWords": null },
+    "fieldConfidence": { "seller.gstin": 1.0, "seller.name": 0.9, "totals.grandTotal": 1.0 }
+  }
+}
+```
+
+`fieldConfidence` (0..1 per field) drives the review screen's "check this"
+highlights. Accuracy of the structurer is scored by
+`tests/accuracy_report.py` against `tests/fixtures/layout_golden.json`
+(see `tests/ACCURACY_BASELINE.md`).
 
 ## Tests
 

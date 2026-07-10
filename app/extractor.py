@@ -1,5 +1,14 @@
-"""Extraction engines: digital-PDF text layer (fast path) and PaddleOCR."""
+"""Extraction engines: digital-PDF text layer (fast path) and PaddleOCR.
+
+Two OCR engines for the image / scanned-PDF path, chosen by `config.OCR_ENGINE`:
+  • "classic" (default) — PP-OCRv5 detection + recognition.
+  • "vl" — PaddleOCR-VL, a local ~0.9B vision-language model. Better on hard
+    scans but far slower on CPU; falls back to classic on any error so a page is
+    never left unread.
+Both emit the same page dict, so structuring downstream is engine-agnostic.
+"""
 import io
+import logging
 import math
 import time
 from statistics import median
@@ -7,6 +16,8 @@ from typing import Dict, List, Optional, Tuple
 
 from . import config
 from .reading_order import tokens_to_text
+
+logger = logging.getLogger("ocr-service.extractor")
 
 # PaddleOCR is optional at import time: the digital-PDF path must work in a
 # light install (see README). The engine is also lazily constructed so process
@@ -228,6 +239,103 @@ def _empty_page(page_index: int, size: Tuple[float, float]) -> Dict:
     return {"index": page_index, "width": float(size[0]), "height": float(size[1]), "text": "", "tokens": [], "tables": []}
 
 
+# ── PaddleOCR-VL path (opt-in local vision-language model) ────────────────────
+
+_vl_engine = None
+
+
+def _get_vl_engine():
+    """Lazily build the PaddleOCR-VL pipeline (weights download on first use).
+
+    Doc-orientation/unwarping pre-models are disabled (invoices are page-shaped
+    and they add cost + ARM crash surface), matching the classic engine.
+    """
+    global _vl_engine
+    if _vl_engine is None:
+        from paddleocr import PaddleOCRVL
+
+        _vl_engine = PaddleOCRVL(use_doc_orientation_classify=False, use_doc_unwarping=False)
+    return _vl_engine
+
+
+def _vl_tokens_from_result(res, size: Tuple[float, float]) -> Tuple[List[Dict], str]:
+    """Best-effort map a PaddleOCR-VL result into (tokens, text).
+
+    VL returns layout blocks with bounding boxes + recognised content. We emit one
+    token per block (its bbox + text) so the geometry-based structuring keeps the
+    column layout; the reading-order text is derived from those tokens. Defensive:
+    unknown result shapes yield ([], "") and the caller falls back to classic.
+    """
+    data = res.json if hasattr(res, "json") else res
+    if isinstance(data, dict) and "res" in data:
+        data = data["res"]
+    blocks = []
+    if isinstance(data, dict):
+        for key in ("parsing_res_list", "layout_parsing_result", "blocks", "boxes"):
+            if isinstance(data.get(key), list):
+                blocks = data[key]
+                break
+
+    tokens: List[Dict] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        bbox = block.get("block_bbox") or block.get("bbox") or block.get("layout_bbox")
+        text = block.get("block_content") or block.get("content") or block.get("text") or ""
+        if not (bbox and str(text).strip()):
+            continue
+        try:
+            x0, y0, x1, y1 = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+        except (TypeError, ValueError, IndexError):
+            continue
+        # A multiline block → one token per line, stacked within the block bbox.
+        lines = [ln for ln in str(text).splitlines() if ln.strip()] or [str(text)]
+        step = (y1 - y0) / max(1, len(lines))
+        for i, line in enumerate(lines):
+            tokens.append({
+                "text": line.strip(),
+                "bbox": [x0, y0 + i * step, x1, y0 + (i + 1) * step],
+                "confidence": float(block.get("score", 0.9) or 0.9),
+            })
+
+    if tokens:
+        return tokens, tokens_to_text(tokens)
+    # No geometry available — fall back to the markdown/plain text of the page.
+    md = getattr(res, "markdown", None)
+    text = md.get("markdown_texts") if isinstance(md, dict) else (md or "")
+    return [], str(text or "").strip()
+
+
+def _run_vl_ocr(image_bytes: bytes, page_index: int) -> Dict:
+    """OCR one page image with PaddleOCR-VL."""
+    import numpy as np
+    from PIL import Image
+
+    image = _fit_for_ocr(Image.open(io.BytesIO(image_bytes)).convert("RGB"))
+    size = (float(image.width), float(image.height))
+    results = _get_vl_engine().predict(input=np.array(image))
+    if not results:
+        return _empty_page(page_index, size)
+    tokens, text = _vl_tokens_from_result(results[0], size)
+    return {"index": page_index, "width": size[0], "height": size[1], "text": text, "tokens": tokens, "tables": []}
+
+
+def _ocr_page(image_bytes: bytes, page_index: int) -> Dict:
+    """Run the configured OCR engine on one page, falling back to classic OCR if
+    the VL engine raises (download failure / unsupported result shape).
+
+    ⚠️ PaddleOCR-VL SEGFAULTS on inference on aarch64/CPU hosts. A SIGSEGV crashes
+    the whole worker and is NOT catchable here, so `OCR_ENGINE=vl` is only safe on
+    x86 / GPU machines. The default is "classic" for exactly this reason.
+    """
+    if config.OCR_ENGINE == "vl":
+        try:
+            return _run_vl_ocr(image_bytes, page_index)
+        except Exception as exc:  # download failed / unsupported result shape (NOT a segfault)
+            logger.warning("PaddleOCR-VL failed on page %d (%s); falling back to classic OCR", page_index, exc)
+    return _run_ocr(image_bytes, page_index)
+
+
 def _rasterise_pdf(data: bytes) -> List[bytes]:
     import fitz  # pymupdf
 
@@ -259,10 +367,10 @@ def extract(data: bytes, content_type: str) -> Dict:
                 method = "ocr"
 
         if pages is None:  # scanned PDF → rasterise then OCR
-            pages = [_run_ocr(image, index) for index, image in enumerate(_rasterise_pdf(data))]
+            pages = [_ocr_page(image, index) for index, image in enumerate(_rasterise_pdf(data))]
 
     elif content_type in config.IMAGE_MIME_TYPES:
-        pages = [_run_ocr(data, 0)]
+        pages = [_ocr_page(data, 0)]
         method = "ocr"
 
     else:

@@ -36,6 +36,76 @@ class ExtractResponse(BaseModel):
     pages: List[Page]
 
 
+# ── Structured invoice (mirror of the TS `ExtractedInvoice` contract) ─────────
+
+class PartyBlock(BaseModel):
+    name: str
+    address: str
+    gstin: Optional[str] = None
+    stateCode: Optional[str] = None
+    stateName: Optional[str] = None
+    pan: Optional[str] = None
+
+
+class LineItem(BaseModel):
+    description: str
+    hsnSac: Optional[str] = None
+    quantity: float
+    unit: Optional[str] = None
+    rate: float
+    discount: Optional[float] = None
+    taxableAmount: float
+    gstRate: Optional[float] = None
+    cgstAmount: Optional[float] = None
+    sgstAmount: Optional[float] = None
+    igstAmount: Optional[float] = None
+    lineTotal: Optional[float] = None
+    confidence: float
+
+
+class TaxSlab(BaseModel):
+    rate: float
+    taxableAmount: float
+    cgst: float
+    sgst: float
+    igst: float
+
+
+class Totals(BaseModel):
+    taxableTotal: float
+    taxTotal: float
+    roundOff: float
+    grandTotal: float
+    amountInWords: Optional[str] = None
+
+
+class InvoiceMeta(BaseModel):
+    number: str
+    date: Optional[str] = None
+
+
+class ExtractedInvoice(BaseModel):
+    schemaVersion: int
+    seller: PartyBlock
+    buyer: PartyBlock
+    invoice: InvoiceMeta
+    lineItems: List[LineItem] = Field(default_factory=list)
+    taxSummary: List[TaxSlab] = Field(default_factory=list)
+    totals: Totals
+    fieldConfidence: dict = Field(default_factory=dict)
+
+
+class ParseResponse(BaseModel):
+    method: ExtractionMethod
+    #: Only the offline rule-based structurer exists; recorded for provenance.
+    structuringMethod: Literal["rules"] = "rules"
+    pageCount: int
+    durationMs: int
+    #: Reading-order text of the whole document (stored as the scan's rawText).
+    text: str
+    invoice: ExtractedInvoice
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok"]
     ocr_available: bool
