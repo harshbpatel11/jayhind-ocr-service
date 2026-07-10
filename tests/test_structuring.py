@@ -13,7 +13,7 @@ import pytest
 from app.extractor import extract
 from app.structuring import parse_invoice
 from app.structuring.gstin import derive_basics, find_gstins, is_checksum_valid, repair_gstin
-from app.structuring.items import parse_totals
+from app.structuring.items import _invoice_no_from_text, _qty_and_unit, parse_items_from_table, parse_totals
 from app.structuring.parties import (
     is_document_title,
     marker_kind,
@@ -40,10 +40,20 @@ def test_normalize_amount(raw, expected):
     ("2026-07-05", "2026-07-05"),
     ("05-07-2026", "2026-07-05"),      # day-first (Indian convention)
     ("5 Jul 2026", "2026-07-05"),
+    ("5th July 2026", "2026-07-05"),   # ordinal + full month name
+    ("July 5, 2026", "2026-07-05"),    # month-first (US)
+    ("05.07.26", "2026-07-05"),        # dotted, 2-digit year
     ("31-02-2026", None),              # overflow rejected
 ])
 def test_parse_date(raw, expected):
     assert parse_date(raw) == expected
+
+
+@pytest.mark.parametrize("cell,qty,unit", [
+    ("2 PCS", 2, "PCS"), ("10.5 KG", 10.5, "KG"), ("3", 3, None), ("", 0, None),
+])
+def test_qty_and_unit(cell, qty, unit):
+    assert _qty_and_unit(cell) == (qty, unit)
 
 
 def test_edit_distance():
@@ -120,6 +130,33 @@ def test_parse_party_block_keeps_pan_and_state_out_of_address():
     assert block["stateName"] == "Gujarat"
 
 
+def test_parse_party_block_reads_phone_email_and_pincode():
+    """These three are printed but are not derivable from the GSTIN, so the party
+    form falls back to them when the GST auto-fill leaves a field empty."""
+    block = parse_party_block(
+        "Supplier: Prime Industrial Supplies Pvt. Ltd.\n"
+        "Unit-7, Naroda GIDC, Ahmedabad, Gujarat - 382330\n"
+        "GSTIN: 24AABCP3456M1Z7\nPAN: AABCP3456M\nState: Gujarat (24)\n"
+        "Phone: +91-79-40001234\nEmail: accounts@prime-demo.in"
+    )
+    assert block["phone"] == "917940001234"
+    assert block["email"] == "accounts@prime-demo.in"
+    assert block["pincode"] == "382330"
+    # Contact lines are meta lines, so they never leak into the address.
+    assert "Phone" not in block["address"] and "@" not in block["address"]
+
+
+def test_parse_party_block_bare_mobile_and_no_contact():
+    """An unlabelled 10-digit mobile is still found; a block carrying no contact
+    details yields None rather than a stray slice of some other number."""
+    with_mobile = parse_party_block("Metro Infra Ltd\n12 Ring Road, Surat\n9876543210")
+    assert with_mobile["phone"] == "9876543210"
+
+    # No PIN in the address, and an invoice number is never mistaken for one.
+    bare = parse_party_block("Acme Co\nPlot 4, MIDC\nInvoice No: INV-2026-1102")
+    assert bare["phone"] is None and bare["email"] is None and bare["pincode"] is None
+
+
 # ── totals (broadened lexicons) ───────────────────────────────────────────────
 
 def test_parse_totals_terse_labels():
@@ -131,6 +168,34 @@ def test_parse_totals_terse_labels():
 
 def test_parse_totals_plain_total_is_grand():
     assert parse_totals("Milk 62\nTotal 185")["totals"]["grandTotal"] == 185
+
+
+# ── line items: real-world variety ────────────────────────────────────────────
+
+def test_multiline_description_merges_into_previous_item():
+    table = {"rows": [
+        ["Description", "Qty", "Rate", "Amount"],
+        ["Industrial Motor", "2", "12500", "25000"],
+        ["with thermal overload protection", "", "", ""],   # wrapped description
+        ["Copper Cable", "50", "240", "12000"],
+    ]}
+    items = parse_items_from_table(table)
+    assert len(items) == 2
+    assert "thermal overload" in items[0]["description"]
+
+
+def test_discount_and_inline_unit():
+    table = {"rows": [
+        ["Description", "Qty", "Rate", "Disc", "Amount"],
+        ["Widget", "3 PCS", "100", "50", ""],   # amount blank → qty*rate - disc
+    ]}
+    item = parse_items_from_table(table)[0]
+    assert item["quantity"] == 3 and item["unit"] == "PCS"
+    assert item["discount"] == 50 and item["taxableAmount"] == 250
+
+
+def test_invoice_number_voucher_label():
+    assert _invoice_no_from_text("Voucher No: V-2026-77") == "V-2026-77"
 
 
 # ── golden accuracy set (the layout families) ─────────────────────────────────

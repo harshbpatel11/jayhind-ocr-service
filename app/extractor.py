@@ -25,16 +25,35 @@ logger = logging.getLogger("ocr-service.extractor")
 _ocr_engine = None
 _ocr_import_error: Optional[str] = None
 
-try:  # pragma: no cover - import guard
-    from paddleocr import PaddleOCR  # noqa: F401
+# Presence is checked WITHOUT importing: paddlepaddle and onnxruntime segfault
+# when loaded into the same process on ARM, so the unused engine must never be
+# imported. The real import happens lazily in `_get_ocr_engine()`.
+def _paddle_importable() -> bool:  # pragma: no cover - trivial guard
+    import importlib.util
 
-    _OCR_IMPORTABLE = True
-except Exception as exc:  # pragma: no cover - import guard
-    _OCR_IMPORTABLE = False
-    _ocr_import_error = str(exc)
+    try:
+        return importlib.util.find_spec("paddleocr") is not None
+    except Exception:
+        return False
+
+
+_OCR_IMPORTABLE = _paddle_importable()
+if not _OCR_IMPORTABLE:
+    _ocr_import_error = "paddleocr is not installed"
+
+
+def _onnx_importable() -> bool:
+    """Presence check WITHOUT importing: loading onnxruntime and paddle into the
+    same process segfaults on ARM, so we never import the engine we won't use."""
+    import importlib.util
+
+    return importlib.util.find_spec("rapidocr_onnxruntime") is not None
 
 
 def ocr_available() -> bool:
+    """Whether the *configured* engine can run (reported by /health)."""
+    if config.OCR_ENGINE == "onnx":
+        return _onnx_importable()
     return _OCR_IMPORTABLE
 
 
@@ -170,6 +189,60 @@ def _polygons_to_tokens(texts, scores, polys, size: Tuple[float, float]) -> List
     return tokens
 
 
+def _deskew_gray(gray):
+    """Rotate a grayscale image so its text lines are horizontal.
+
+    The skew angle is the tilt of the minimum-area rectangle around the text
+    pixels. Tiny (<0.3°) and implausible (>15°) angles are ignored so a clean
+    page or a bad estimate is left untouched.
+    """
+    import cv2
+    import numpy as np
+
+    inverted = 255 - gray
+    mask = cv2.threshold(inverted, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+    coords = np.column_stack(np.where(mask > 0))
+    if len(coords) < 50:
+        return gray
+    # minAreaRect's angle convention differs across OpenCV versions (it can report
+    # 7° or 83° for the same 7° tilt). Fold it into (-45, 45] then correct by its
+    # negation — verified to zero the residual for both signs on real pages.
+    raw = cv2.minAreaRect(coords)[-1]
+    angle = raw % 90
+    if angle > 45:
+        angle -= 90
+    correction = -angle
+    if abs(correction) < 0.3 or abs(correction) > 15:
+        return gray
+    h, w = gray.shape
+    matrix = cv2.getRotationMatrix2D((w / 2, h / 2), correction, 1.0)
+    return cv2.warpAffine(gray, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+
+def _preprocess_for_ocr(image):
+    """Clean a photographed/scanned page before OCR: grayscale → deskew → local
+    contrast (CLAHE) → gentle denoise. Returns a PIL RGB image (PaddleOCR wants
+    3 channels). Best-effort: any failure returns the original image unchanged.
+    """
+    if not config.OCR_PREPROCESS:
+        return image
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image
+
+        gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+        gray = _deskew_gray(gray)
+        gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+        # Edge-preserving denoise — removes photo/scanner speckle without
+        # smearing glyph strokes (bilateral keeps edges sharp).
+        gray = cv2.bilateralFilter(gray, d=5, sigmaColor=40, sigmaSpace=40)
+        return Image.fromarray(cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB))
+    except Exception as exc:  # never let preprocessing break extraction
+        logger.warning("image preprocessing failed (%s); using the original image", exc)
+        return image
+
+
 def _fit_for_ocr(image):
     """Scale an image so its longest side lands inside the band Paddle reads best.
 
@@ -205,7 +278,7 @@ def _run_ocr(image_bytes: bytes, page_index: int) -> Dict:
     import numpy as np
     from PIL import Image
 
-    image = _fit_for_ocr(Image.open(io.BytesIO(image_bytes)).convert("RGB"))
+    image = _fit_for_ocr(_preprocess_for_ocr(Image.open(io.BytesIO(image_bytes)).convert("RGB")))
     size = (float(image.width), float(image.height))
     array = np.array(image)
 
@@ -237,6 +310,55 @@ def _run_ocr(image_bytes: bytes, page_index: int) -> Dict:
 
 def _empty_page(page_index: int, size: Tuple[float, float]) -> Dict:
     return {"index": page_index, "width": float(size[0]), "height": float(size[1]), "text": "", "tokens": [], "tables": []}
+
+
+# ── ONNX Runtime path (RapidOCR — the default engine) ────────────────────────
+
+_onnx_engine = None
+
+
+def _get_onnx_engine():
+    """Lazily build the RapidOCR (ONNX Runtime) engine. Bundled PP-OCR ONNX models
+    — no download, no paddlepaddle."""
+    global _onnx_engine
+    if _onnx_engine is None:
+        from rapidocr_onnxruntime import RapidOCR
+
+        _onnx_engine = RapidOCR()
+    return _onnx_engine
+
+
+def _run_onnx_ocr(image_bytes: bytes, page_index: int) -> Dict:
+    """OCR one page with RapidOCR/ONNX: ~8x faster than paddle on CPU and more
+    robust on tilted/blurred photos (measured — see tests/ACCURACY_BASELINE.md).
+
+    RapidOCR returns a quadrilateral per line; the page is already de-skewed by
+    `_preprocess_for_ocr`, so an axis-aligned bounding box is faithful.
+    """
+    import numpy as np
+    from PIL import Image
+
+    image = _fit_for_ocr(_preprocess_for_ocr(Image.open(io.BytesIO(image_bytes)).convert("RGB")))
+    size = (float(image.width), float(image.height))
+    result, _elapse = _get_onnx_engine()(np.array(image))
+    if not result:
+        return _empty_page(page_index, size)
+
+    tokens: List[Dict] = []
+    for box, text, score in result:
+        if not str(text).strip():
+            continue
+        xs = [float(p[0]) for p in box]
+        ys = [float(p[1]) for p in box]
+        tokens.append({
+            "text": str(text),
+            "bbox": [min(xs), min(ys), max(xs), max(ys)],
+            "confidence": float(score),
+        })
+    return {
+        "index": page_index, "width": size[0], "height": size[1],
+        "text": tokens_to_text(tokens), "tokens": tokens, "tables": [],
+    }
 
 
 # ── PaddleOCR-VL path (opt-in local vision-language model) ────────────────────
@@ -321,14 +443,20 @@ def _run_vl_ocr(image_bytes: bytes, page_index: int) -> Dict:
 
 
 def _ocr_page(image_bytes: bytes, page_index: int) -> Dict:
-    """Run the configured OCR engine on one page, falling back to classic OCR if
-    the VL engine raises (download failure / unsupported result shape).
+    """Run the configured OCR engine on one page.
 
-    ⚠️ PaddleOCR-VL SEGFAULTS on inference on aarch64/CPU hosts. A SIGSEGV crashes
-    the whole worker and is NOT catchable here, so `OCR_ENGINE=vl` is only safe on
-    x86 / GPU machines. The default is "classic" for exactly this reason.
+    ⚠️ Engines are **mutually exclusive per process**: loading onnxruntime and
+    paddlepaddle together segfaults on ARM. So `onnx` never auto-falls-back to
+    `classic` in-process — switching engines is an env change (`OCR_ENGINE`), and
+    a failed page surfaces as an error the backend can retry.
+
+    ⚠️ PaddleOCR-VL also SEGFAULTS on inference on aarch64/CPU. A SIGSEGV crashes
+    the worker and is not catchable, so `OCR_ENGINE=vl` is x86 / GPU only.
     """
-    if config.OCR_ENGINE == "vl":
+    engine = config.OCR_ENGINE
+    if engine == "onnx":
+        return _run_onnx_ocr(image_bytes, page_index)
+    if engine == "vl":
         try:
             return _run_vl_ocr(image_bytes, page_index)
         except Exception as exc:  # download failed / unsupported result shape (NOT a segfault)

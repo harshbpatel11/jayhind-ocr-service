@@ -11,6 +11,8 @@ from typing import Optional
 MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
     "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+    "january": 1, "february": 2, "march": 3, "april": 4, "june": 6, "july": 7,
+    "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
 }
 
 _AMOUNT_CLEAN = re.compile(r"[₹$€]|\bRs\.?|\bINR\b", re.IGNORECASE)
@@ -72,15 +74,26 @@ def parse_date(raw) -> Optional[str]:
         return None
     s = str(raw).strip()
 
+    # Drop ordinal suffixes: "5th July" → "5 July".
+    s = re.sub(r"\b(\d{1,2})(?:st|nd|rd|th)\b", r"\1", s, flags=re.IGNORECASE)
+
     iso = re.search(r"\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b", s)
     if iso:
         return _build_date(int(iso[1]), int(iso[2]), int(iso[3]))
 
-    named = re.search(r"\b(\d{1,2})[-/.\s]([A-Za-z]{3,4})[-/.\s](\d{2,4})\b", s)
+    # Day first: "05-Jul-2026" / "5 July 2026".
+    named = re.search(r"\b(\d{1,2})[-/.\s]([A-Za-z]{3,9})[-/.\s,]*(\d{2,4})\b", s)
     if named:
         month = MONTHS.get(named[2].lower())
         if month:
             return _build_date(_expand_year(int(named[3])), month, int(named[1]))
+
+    # Month first: "July 5, 2026" / "Jul 5 2026".
+    month_first = re.search(r"\b([A-Za-z]{3,9})[-/.\s]+(\d{1,2})[-/.\s,]+(\d{2,4})\b", s)
+    if month_first:
+        month = MONTHS.get(month_first[1].lower())
+        if month:
+            return _build_date(_expand_year(int(month_first[3])), month, int(month_first[2]))
 
     numeric = re.search(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})\b", s)
     if numeric:

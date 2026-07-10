@@ -45,6 +45,11 @@ class PartyBlock(BaseModel):
     stateCode: Optional[str] = None
     stateName: Optional[str] = None
     pan: Optional[str] = None
+    #: Printed on the invoice but absent from the GSTIN and the GST registry —
+    #: the document is the only source, so the party form falls back to these.
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    pincode: Optional[str] = None
 
 
 class LineItem(BaseModel):

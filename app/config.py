@@ -17,12 +17,17 @@ USE_GPU: bool = _bool("OCR_USE_GPU", False)
 LANG: str = os.getenv("OCR_LANG", "en")
 
 #: Which extraction engine to use for images / scanned PDFs:
-#:   "classic" — PP-OCRv5 detection + recognition (fast, proven on ARM).
-#:   "vl"      — PaddleOCR-VL, a local ~0.9B vision-language model that reads hard
-#:               scans/photos far better but is much slower on CPU. Falls back to
-#:               classic automatically if it is unavailable or errors on a page.
+#:   "onnx" (default) — RapidOCR on ONNX Runtime. Bundled PP-OCR ONNX models, no
+#:               paddlepaddle. Measured ~8x faster than "classic" on CPU **and**
+#:               more accurate on tilted/blurred photos.
+#:   "classic"  — PaddleOCR (PP-OCRv5). The fallback engine; select it if a real
+#:               invoice ever trips ONNX.
+#:   "vl"       — PaddleOCR-VL, a local ~0.9B vision-language model. x86/GPU only
+#:               (it segfaults on aarch64/CPU).
+#: ⚠️ Engines are mutually exclusive per process — onnxruntime and paddlepaddle
+#: segfault when loaded together on ARM, so we never import the one we don't use.
 #: Digital PDFs always take the exact text-layer path regardless of this setting.
-OCR_ENGINE: str = os.getenv("OCR_ENGINE", "classic").strip().lower()
+OCR_ENGINE: str = os.getenv("OCR_ENGINE", "onnx").strip().lower()
 
 #: Model tier for the classic engine:
 #:   "fast" (default) — PP-OCRv5 **mobile** models + 200 DPI. Stable and quick on
@@ -51,6 +56,12 @@ DPI: int = _int("OCR_DPI", 300 if _ACCURATE else 200)
 
 #: PaddleOCR-VL model name (used only when OCR_ENGINE="vl").
 VL_REC_MODEL: str = os.getenv("OCR_VL_MODEL", "PaddleOCR-VL-0.9B")
+
+#: Clean up photographed / scanned images before OCR (deskew + adaptive contrast
+#: + gentle denoise via OpenCV). Helps recognition on phone photos and faxed
+#: paper; harmless on clean scans. Applies only to the OCR path, never digital
+#: PDFs. Set OCR_PREPROCESS=0 to disable.
+OCR_PREPROCESS: bool = _bool("OCR_PREPROCESS", True)
 
 #: Hard cap on pages processed per document (protects the worker from a 200-page scan).
 MAX_PAGES: int = _int("OCR_MAX_PAGES", 10)

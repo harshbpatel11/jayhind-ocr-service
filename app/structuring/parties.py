@@ -13,7 +13,12 @@ Multiple strategies, best-per-party wins (a named block, GSTIN preferred):
 The document *title* is never a party: it sits above the anchors, so
 anchor-relative reading kills the old "title-becomes-the-name" bug. Output blocks
 match the TS `ExtractedPartyBlock` (`{name, address, gstin, stateCode, stateName,
-pan}`).
+pan, phone, email, pincode}`).
+
+`phone` / `email` / `pincode` are printed on the invoice but are *not* encoded in
+a GSTIN and are absent from the GST registry lookup, so the document is the only
+source for them — the party quick-add form falls back to these when the GSTIN
+auto-fill leaves a field empty.
 """
 import re
 from typing import Dict, List, Optional, Tuple
@@ -28,7 +33,8 @@ _BUYER_PHRASES = ["billed to", "bill to", "invoice to", "sold to", "buyer", "con
 _SELLER_PHRASES = ["sold by", "supplier", "seller", "vendor", "from", "m/s", "mfr", "manufacturer"]
 _ALL_PHRASES = [(p, "buyer") for p in _BUYER_PHRASES] + [(p, "seller") for p in _SELLER_PHRASES]
 
-_EMPTY = {"name": "", "address": "", "gstin": None, "stateCode": None, "stateName": None, "pan": None}
+_EMPTY = {"name": "", "address": "", "gstin": None, "stateCode": None, "stateName": None,
+          "pan": None, "phone": None, "email": None, "pincode": None}
 
 
 def _norm_lead(text: str) -> str:
@@ -133,6 +139,50 @@ def _strip_markers(line: str) -> str:
     return re.sub(r"\s{2,}", " ", out).strip()
 
 
+# ── Contact details (phone / email / pincode) ────────────────────────────────
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+#: A labelled number: "Phone: +91-79-40001234", "Mob. 98765 43210". The value run
+#: allows digits/space/dash/parens and must end on a digit, so a trailing
+#: "Email:" or a second comma-separated number is never swallowed.
+_PHONE_LABELLED_RE = re.compile(
+    r"(?:phone|telephone|tel|mob(?:ile)?|contact(?:\s*(?:no|number))?|cell|ph)\b[\s:.#\-]*"
+    r"(\+?\d[\d\s\-()]{7,}\d)",
+    re.IGNORECASE,
+)
+#: An unlabelled 10-digit Indian mobile (leads 6–9) anywhere in the block.
+_MOBILE_RE = re.compile(r"(?<!\d)([6-9]\d{9})(?!\d)")
+#: A standalone 6-digit PIN. Digit-bounded, so it cannot sit inside a longer
+#: number; a GSTIN/PAN always carries letters, so neither can match here.
+_PINCODE_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
+
+
+def _extract_contact(block_text: str, address: str):
+    """(phone, email, pincode) for one party block.
+
+    Phone keeps its digits only (with any 91/0 trunk prefix) — the consumer
+    normalises to a bare 10-digit number. The PIN is read from the *address*
+    rather than the whole block: the block also holds phone numbers, and an
+    8–12 digit phone run must never surrender a 6-digit slice as a PIN.
+    """
+    email_hit = _EMAIL_RE.search(block_text)
+
+    phone = None
+    labelled = _PHONE_LABELLED_RE.search(block_text)
+    if labelled:
+        digits = re.sub(r"\D", "", labelled[1])
+        # 10 = bare mobile/landline, 11 = 0-trunk, 12 = 91-prefixed.
+        if 10 <= len(digits) <= 12:
+            phone = digits
+    if not phone:
+        bare = _MOBILE_RE.search(block_text)
+        phone = bare[1] if bare else None
+
+    # The PIN trails an Indian address ("… Ahmedabad, Gujarat - 382330").
+    pins = _PINCODE_RE.findall(address or "")
+
+    return phone, (email_hit[0] if email_hit else None), (pins[-1] if pins else None)
+
+
 def _looks_like_address(line: str) -> bool:
     return bool(re.search(r"\d", line) or "," in line or _ADDRESS_KW.search(line))
 
@@ -203,7 +253,8 @@ def _value_from_cell(cell: str) -> Optional[str]:
 
 
 def parse_party_block(block_text: str) -> Dict:
-    """Parse one party block's text → name / address / GSTIN / state / PAN."""
+    """Parse one party block's text → name / address / GSTIN / state / PAN /
+    phone / email / pincode."""
     normalized = strip_html(block_text)
     lines = [ln.strip() for ln in normalized.split("\n") if ln.strip()]
     if not lines:
@@ -231,6 +282,10 @@ def parse_party_block(block_text: str) -> Dict:
                 state_name = m[1].split("(")[0].strip()
                 break
 
+    # Read contacts off the *unfiltered* block: phone/email sit on meta lines,
+    # which `address` deliberately drops.
+    phone, email, pincode = _extract_contact(normalized, address)
+
     return {
         "name": name,
         "address": address,
@@ -238,6 +293,9 @@ def parse_party_block(block_text: str) -> Dict:
         "stateCode": basics["stateCode"] if basics else None,
         "stateName": state_name,
         "pan": basics["panNo"] if basics else None,
+        "phone": phone,
+        "email": email,
+        "pincode": pincode,
     }
 
 

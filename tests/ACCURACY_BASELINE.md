@@ -38,13 +38,34 @@ tables) instead of flattened text lines, plus broadened column/label lexicons an
 title-bleed handling. It applies to digital PDFs (the exact text-layer path — no
 OCR model involved) and OCR output alike.
 
-## OCR engine notes (this aarch64 / CPU box)
+## OCR engine benchmark (this aarch64 / CPU box)
 
-- **classic + fast (mobile) = default**: stable, ~13-19s/page.
-- **classic + accurate (server models, 300 DPI)**: opt-in (`OCR_MODEL_TIER=accurate`).
-  Measured **>2 min/page** here and heavy on RAM — prefer on x86/GPU/many-core.
-- **PaddleOCR-VL (`OCR_ENGINE=vl`)**: installable (`paddlex[ocr]`, weights ~1.8 GB)
-  and wired with auto-fallback, but it **SEGFAULTS on inference on this ARM/CPU
-  host** (same class as PP-OCRv6). A SIGSEGV cannot be caught in-process, so do NOT
-  enable it here — it needs an x86 / GPU host. Left in place for that environment.
+Only images / scanned PDFs use an OCR engine — digital PDFs take the exact
+text-layer path. Fields = 5 checks on `purchase_digital` (both GSTINs, invoice no,
+line count, grand total).
+
+| Input | `classic` (paddle PP-OCRv5 mobile) | **`onnx` (RapidOCR) — default** |
+|---|---|---|
+| clean_scan | 20.6s · 5/5 | **2.6s · 5/5** |
+| low_quality_photo | ~20s · 5/5 | **4.1s · 5/5** |
+| 8° tilt + blur + noise | ~20s · **4/5** | **2.7s · 5/5** |
+
+**≈8× faster and strictly more accurate on degraded scans** → adopted as the
+default engine. `classic` remains as the fallback (`OCR_ENGINE=classic`).
+
+### Image preprocessing (`OCR_PREPROCESS=1`, default)
+Grayscale → deskew → CLAHE contrast → edge-preserving denoise. Measured on paddle:
+an 8° tilted photo went **3/5 → 4/5**, with **no regression** on the clean scan
+(5/5 → 5/5). The deskew sign is load-bearing: getting it wrong *doubles* the tilt
+(regression-tested in `tests/test_preprocess.py`).
+
+### Engines that do NOT work here
+- **Engines are mutually exclusive per process**: onnxruntime + paddlepaddle
+  **segfault when loaded together** on ARM. `extractor.py` therefore imports only
+  the configured engine (`find_spec`, never an import) and `onnx` never
+  auto-falls-back to `classic` in-process.
+- **`OCR_MODEL_TIER=accurate`** (PP-OCRv5 server, 300 DPI): >2 min/page, heavy RAM.
+- **PaddleOCR-VL (`OCR_ENGINE=vl`)**: installs and downloads (~1.8 GB) but
+  **SEGFAULTS on inference on aarch64/CPU** (same class as PP-OCRv6). A SIGSEGV
+  cannot be caught in-process — x86 / GPU hosts only.
 

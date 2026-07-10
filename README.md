@@ -30,30 +30,39 @@ Doc-orientation and doc-unwarping pre-models are **disabled**: invoices are
 already page-shaped, those models cost seconds per page, and they add crash
 surface on ARM. Line-level rotation is still corrected.
 
-### OCR engines & tiers
+### OCR engines
 
 `OCR_ENGINE` picks the engine for images / scanned PDFs (digital PDFs always use
 the exact text-layer path, so this only affects photographed/scanned inputs):
 
-- **`classic`** (default) — PP-OCRv5 detection + recognition. Two model tiers via
-  `OCR_MODEL_TIER`:
-  - `fast` (default) — **PP-OCRv5 mobile** + 200 DPI. Stable and quick (~13–19s/page).
-  - `accurate` — **PP-OCRv5 server** + 300 DPI. Better recognition, but measured
-    **>2 min/page on aarch64/CPU** — prefer it on x86 / GPU / many-core hosts.
+- **`onnx`** (default) — **RapidOCR on ONNX Runtime**. Bundled PP-OCR ONNX models,
+  no download, ~50 MB. Measured on this aarch64/CPU box:
+
+  | Input | `classic` (paddle) | **`onnx`** |
+  |---|---|---|
+  | clean scan | 20.6s · 5/5 fields | **2.6s · 5/5** |
+  | low-quality photo | ~20s · 5/5 | **4.1s · 5/5** |
+  | 8° tilt + blur + noise | ~20s · **4/5** | **2.7s · 5/5** |
+
+  ~8× faster **and** more accurate on degraded scans. Hence the default.
+- **`classic`** — PaddleOCR (PP-OCRv5). The fallback engine. Model tiers via
+  `OCR_MODEL_TIER`: `fast` (mobile, 200 DPI) or `accurate` (server, 300 DPI —
+  measured **>2 min/page** on aarch64, prefer x86/GPU).
 - **`vl`** — **PaddleOCR-VL**, a local ~0.9B vision-language model (needs the
-  `paddlex[ocr]` extra; weights ~1.8 GB). Best on hard scans, but see the ARM note.
+  `paddlex[ocr]` extra; weights ~1.8 GB). x86 / GPU only — see the ARM note.
+
+All inputs are cleaned before OCR (`OCR_PREPROCESS`): grayscale → deskew → CLAHE
+local contrast → edge-preserving denoise.
 
 > ### ⚠️ ARM / aarch64 note
-> On `aarch64` (paddlepaddle 3.2.2) three things crash and are avoided:
+> - **Engines are mutually exclusive per process.** onnxruntime and paddlepaddle
+>   **segfault when loaded together**, so `extractor.py` imports only the
+>   configured engine (presence is checked with `find_spec`, never an import) and
+>   `onnx` never auto-falls-back to `classic` in-process. Switch via `OCR_ENGINE`.
 > - PaddleOCR 3.x's default **PP-OCRv6** models **segfault** → we pin **PP-OCRv5**.
-> - **Multi-threaded** CPU inference segfaults → `cpu_threads=1`.
-> - **`OCR_ENGINE=vl` (PaddleOCR-VL) segfaults on inference** on this ARM/CPU box.
->   A SIGSEGV crashes the worker and cannot be caught, so **do not enable `vl` on
->   ARM** — run it on an x86 / GPU host. The engine is wired (with a fallback for
->   non-crash errors) for exactly those environments.
->
-> On x86 you may raise `OCR_CPU_THREADS` to 2–4, set `OCR_MODEL_TIER=accurate`,
-> or `OCR_ENGINE=vl`.
+> - **Multi-threaded** paddle CPU inference segfaults → `cpu_threads=1`.
+> - **`OCR_ENGINE=vl` segfaults on inference** here. A SIGSEGV crashes the worker
+>   and cannot be caught, so **do not enable `vl` on ARM** — x86 / GPU only.
 
 ## Setup (CPU — recommended)
 
@@ -100,8 +109,9 @@ Mount `/root/.paddleocr` so model weights survive container restarts.
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `OCR_ENGINE` | `classic` | `classic` (PP-OCRv5) or `vl` (PaddleOCR-VL — x86/GPU only, see ARM note) |
-| `OCR_MODEL_TIER` | `fast` | `fast` (mobile, 200 DPI) or `accurate` (server, 300 DPI) |
+| `OCR_ENGINE` | `onnx` | `onnx` (RapidOCR/ONNX — default), `classic` (PaddleOCR fallback), `vl` (x86/GPU only) |
+| `OCR_MODEL_TIER` | `fast` | `classic` only: `fast` (mobile, 200 DPI) or `accurate` (server, 300 DPI) |
+| `OCR_PREPROCESS` | `true` | OpenCV clean-up before OCR (deskew + CLAHE contrast + denoise); OCR path only |
 | `OCR_USE_GPU` | `false` | Use the CUDA PaddlePaddle build |
 | `OCR_LANG` | `en` | PaddleOCR language pack |
 | `OCR_DET_MODEL` | tier default | Override the text-detection model |

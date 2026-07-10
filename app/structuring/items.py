@@ -45,6 +45,23 @@ def _map_columns(header: List[str]) -> Dict[str, int]:
     return mapping
 
 
+def _qty_and_unit(cell: str) -> tuple:
+    """Split a quantity cell that carries its unit inline ("2 PCS", "10.5 KG")."""
+    number = normalize_amount(cell)
+    if number is not None:
+        return number, None
+    lead = re.match(r"\s*([\d,]+(?:\.\d+)?)", cell)
+    qty = normalize_amount(lead[1]) if lead else None
+    unit = re.search(r"([A-Za-z]{1,6})\s*$", cell)
+    return (qty or 0), (unit[1] if unit else None)
+
+
+def _is_continuation(item: Dict) -> bool:
+    """A row that carries only wrapped description text (no numbers) — it belongs
+    to the previous line item, not a new one."""
+    return item["quantity"] == 0 and item["rate"] == 0 and item["taxableAmount"] == 0
+
+
 def _item_from_row(cells: List[str], cols: Dict[str, int]) -> Optional[Dict]:
     def at(role):
         i = cols.get(role)
@@ -54,25 +71,38 @@ def _item_from_row(cells: List[str], cols: Dict[str, int]) -> Optional[Dict]:
     if not description or _SKIP_DESC.match(description):
         return None
 
-    quantity = normalize_amount(at("quantity")) or 0
+    quantity, unit_from_qty = _qty_and_unit(at("quantity"))
     rate = normalize_amount(at("rate")) or 0
+    discount = normalize_amount(at("discount"))
     taxable = normalize_amount(at("taxable"))
     if taxable is None:
-        taxable = round2(quantity * rate)
+        taxable = round2(quantity * rate - (discount or 0))
     gst = normalize_amount(at("gstRate").replace("%", ""))
     return {
         "description": description,
         "hsnSac": at("hsn") or None,
         "quantity": quantity,
-        "unit": at("unit") or None,
+        "unit": at("unit") or unit_from_qty,
         "rate": rate,
-        "discount": normalize_amount(at("discount")),
+        "discount": discount,
         "taxableAmount": taxable,
         "gstRate": gst,
         "cgstAmount": None, "sgstAmount": None, "igstAmount": None,
         "lineTotal": None,
         "confidence": 0.0,
     }
+
+
+def _append(items: List[Dict], item: Optional[Dict]) -> None:
+    """Add a parsed row, folding a description-only continuation into the item
+    above it (multi-line descriptions)."""
+    if not item:
+        return
+    if _is_continuation(item):
+        if items:
+            items[-1]["description"] = f"{items[-1]['description']} {item['description']}".strip()
+        return
+    items.append(item)
 
 
 def parse_items_from_table(table: Dict) -> List[Dict]:
@@ -87,11 +117,9 @@ def parse_items_from_table(table: Dict) -> List[Dict]:
     cols = _map_columns(rows[header_index])
     if "description" not in cols:
         return []
-    items = []
+    items: List[Dict] = []
     for row in rows[header_index + 1:]:
-        item = _item_from_row([_clean(c) for c in row], cols)
-        if item:
-            items.append(item)
+        _append(items, _item_from_row([_clean(c) for c in row], cols))
     return items
 
 
@@ -121,7 +149,8 @@ def parse_items_from_tokens(page: Dict) -> List[Dict]:
     if "description" not in col_roles:
         return []
 
-    items = []
+    items: List[Dict] = []
+    cols = {role: i for i, role in enumerate(col_roles)}
     for line in lines[header_i + 1:]:
         text = " ".join(token_text(t) for t in line)
         if _FOOTER.match(text):
@@ -130,10 +159,7 @@ def parse_items_from_tokens(page: Dict) -> List[Dict]:
         for t in line:
             nearest = min(range(len(col_centres)), key=lambda c: abs(cx(t) - col_centres[c]))
             cells[nearest] = (cells[nearest] + " " + token_text(t)).strip()
-        cols = {role: i for i, role in enumerate(col_roles)}
-        item = _item_from_row(cells, cols)
-        if item:
-            items.append(item)
+        _append(items, _item_from_row(cells, cols))
     return items
 
 
@@ -219,7 +245,7 @@ def build_tax_summary(items: List[Dict], cgst, sgst, igst) -> List[Dict]:
 # ── Invoice number & date ─────────────────────────────────────────────────────
 _DATE_TOKEN = re.compile(r"[0-9]{1,4}[-/.\s][A-Za-z0-9]{1,9}[-/.\s][0-9]{2,4}")
 _NO_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9/\\\-]{1,31}")
-_INV_LABEL = re.compile(r"\b(invoice|bill|inv|receipt)\b\s*(?:no|number|#)?\s*[:.#\-]?\s*(.+)$", re.I)
+_INV_LABEL = re.compile(r"\b(invoice|bill|inv|receipt|voucher|document|doc)\b\s*(?:no|number|#)?\s*[:.#\-]?\s*(.+)$", re.I)
 _PARTY_MARKER = re.compile(r"\b(bill\s*to|billed\s*to|invoice\s*to|sold\s*to|buyer|consignee|customer)\b", re.I)
 
 
