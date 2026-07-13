@@ -49,6 +49,7 @@ BASE_CSS = """
   .r { text-align: right; }
   .party { width: 100%; margin-bottom: 12px; }
   .party td { vertical-align: top; width: 50%; padding: 4px; }
+  td.g { border: 1px solid #999; padding: 4px 8px; }
 """
 
 
@@ -200,6 +201,38 @@ def build() -> list:
       <tr><td colspan=4 class=r>Total</td><td class=r>22650</td></tr></table>"""),
       dict(seller_name="ABC Manufacturing Pvt Ltd", buyer_name="XYZ Retail LLP", invoice_no="INV-1001",
            seller_gstin="24ABCDE1234F1Z1", line_count=2, taxable=None, grand=22650)))
+
+    # 12. Letterhead over a lone Bill To / Ship To box (user sample invoice-new-1):
+    # unlabelled full-width seller header, bordered info grid (Order No / Due Date /
+    # Place of Supply / Payment Terms), CGST+SGST+Total item columns, truncated
+    # decimals ("6,372.0"), amount-in-words, bank block.
+    specs.append(("layout_letterhead.pdf", _doc(f"""<h1>TAX INVOICE</h1>
+      <div><b>ABC Traders Pvt. Ltd.</b><br>GSTIN: 24ABCDE1234F1Z5<br>
+      123 Business Park, Vadodara, Gujarat 390001<br>
+      Phone: +91 98765 43210 | Email: sales@abctraders.com</div>
+      <table style="width:88%;margin:10px auto">
+      <tr><td class=g>Invoice No.</td><td class=g>INV-2026-0001</td><td class=g>Invoice Date</td><td class=g>12-Jul-2026</td></tr>
+      <tr><td class=g>Order No.</td><td class=g>SO-2026-0101</td><td class=g>Due Date</td><td class=g>19-Jul-2026</td></tr>
+      <tr><td class=g>Place of Supply</td><td class=g>Gujarat</td><td class=g>Payment Terms</td><td class=g>7 Days</td></tr></table>
+      <table class=party><tr><th style="text-align:left;border:1px solid #999">Bill To</th>
+      <th style="text-align:left;border:1px solid #999">Ship To</th></tr>
+      <tr><td style="border:1px solid #999">XYZ Enterprises<br>GSTIN:24AACCX1234A1Z2<br>Vadodara, Gujarat</td>
+      <td style="border:1px solid #999">XYZ Warehouse<br>Vadodara, Gujarat</td></tr></table>
+      <table class=items>
+      <tr><th>HSN</th><th>Product</th><th>Qty</th><th>Unit</th><th>Rate</th><th>Taxable</th><th>GST %</th><th>CGST</th><th>SGST</th><th>Total</th></tr>
+      <tr><td>8471</td><td>Wireless Keyboard</td><td class=r>2</td><td>Nos</td><td class=r>1,500.00</td><td class=r>3,000.00</td><td class=r>18%</td><td class=r>270.00</td><td class=r>270.00</td><td class=r>3,540.0</td></tr>
+      <tr><td>8473</td><td>Wireless Mouse</td><td class=r>3</td><td>Nos</td><td class=r>800.00</td><td class=r>2,400.00</td><td class=r>18%</td><td class=r>216.00</td><td class=r>216.00</td><td class=r>2,832.0</td></tr>
+      <tr><td colspan=5></td><td class=r>Subtotal</td><td class=r>5,400.00</td><td></td><td></td><td></td></tr>
+      <tr><td colspan=6></td><td class=r>CGST</td><td class=r>486.00</td><td></td><td></td></tr>
+      <tr><td colspan=6></td><td class=r>SGST</td><td class=r>486.00</td><td></td><td></td></tr>
+      <tr><td colspan=8></td><td class=r>Grand Total</td><td class=r>6,372.0</td></tr></table>
+      <p><b>Amount in Words:</b> Indian Rupees Six Thousand Three Hundred Seventy-Two Only</p>
+      <p><b>Bank Details:</b><br>Bank: HDFC Bank<br>A/C No: 12345678901234<br>IFSC: HDFC0001234</p>
+      <p>Terms: 1. Goods once sold will not be taken back. 2. Interest @18% p.a. on overdue invoices.</p>"""),
+      dict(seller_name="ABC Traders Pvt. Ltd.", buyer_name="XYZ Enterprises",
+           invoice_no="INV-2026-0001", invoice_date="2026-07-12",
+           seller_gstin="24ABCDE1234F1Z5", buyer_gstin="24AACCX1234A1Z2",
+           line_count=2, taxable=5400, grand=6372)))
 
     return specs
 

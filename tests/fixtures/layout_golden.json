@@ -105,5 +105,17 @@
     "line_count": 2,
     "taxable": null,
     "grand": 22650
+  },
+  {
+    "file": "layout_letterhead.pdf",
+    "seller_name": "ABC Traders Pvt. Ltd.",
+    "buyer_name": "XYZ Enterprises",
+    "invoice_no": "INV-2026-0001",
+    "invoice_date": "2026-07-12",
+    "seller_gstin": "24ABCDE1234F1Z5",
+    "buyer_gstin": "24AACCX1234A1Z2",
+    "line_count": 2,
+    "taxable": 5400,
+    "grand": 6372
   }
 ]

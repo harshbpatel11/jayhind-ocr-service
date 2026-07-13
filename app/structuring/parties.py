@@ -71,6 +71,13 @@ _TITLE_CORE = {"invoice", "einvoice", "billofsupply", "cashmemo", "creditnote", 
 _COPY_MARKER = re.compile(r"\b(original|duplicate|triplicate|copy)\b", re.IGNORECASE)
 
 
+_TITLE_QUALIFIER_WORDS = (
+    "original", "duplicate", "triplicate", "extra", "copy", "for", "recipient", "transporter",
+    "supplier", "buyer", "customer", "purchase", "sales", "sale", "retail", "wholesale", "gst",
+    "composite", "revised", "supplementary", "commercial", "tax",
+)
+
+
 def is_document_title(line: str) -> bool:
     text = (line or "").strip()
     if not text or len(text) > 60:
@@ -78,6 +85,18 @@ def is_document_title(line: str) -> bool:
     core = re.sub(r"[^a-z]", "", _TITLE_QUALIFIER.sub(" ", text).lower())
     if not core:
         return bool(_COPY_MARKER.search(text))
+    if core in _TITLE_CORE:
+        return True
+    # OCR often merges the words ("TAXINVOICE") so the \b qualifier strip above
+    # can't fire — peel qualifier words off the de-spaced core instead.
+    changed = True
+    while changed:
+        changed = False
+        for q in _TITLE_QUALIFIER_WORDS:
+            if core != q and core.startswith(q):
+                core, changed = core[len(q):], True
+            if core != q and core.endswith(q):
+                core, changed = core[: -len(q)], True
     return core in _TITLE_CORE
 
 
@@ -96,6 +115,24 @@ _META_WITH_SEP = re.compile(
     r"^\s*(?:state(?:\s*code)?|dated?|due\s*date|po\s*(?:no|number)?|ref(?:erence)?)\s*[:.#\-]",
     re.IGNORECASE,
 )
+#: Document-info labels — bare ("Due Date", "Order No.") or with a value
+#: ("Order No. SO-2026-0101"). These head the invoice-info grid, never a party
+#: block: they end the seller letterhead and are dropped from names/addresses.
+#: Party meta (GSTIN/PAN/phone/email) is deliberately NOT here — those lines
+#: belong inside a party block.
+_DOC_META = re.compile(
+    r"^\s*(?:invoice|bill|order|p\.?o\.?|due|dated?|payment\s*terms|"
+    r"terms\s*of\s*(?:payment|delivery)|place\s*of\s*supply|reverse\s*charge|"
+    r"e-?way(?:\s*bill)?|irn|ack(?:nowledgement)?|challan|delivery\s*(?:note|date)|"
+    r"dispatch(?:ed)?(?:\s*(?:through|date|doc))?|destination|vehicle|lr|transporter|"
+    r"mode\s*of\s*payment|supplier'?s?\s*ref|buyer'?s?\s*(?:order|ref))"
+    r"\s*(?:no|number|date)?\s*[.:#\-]?(?:\s|$)",
+    re.IGNORECASE,
+)
+
+
+def is_doc_meta(text: str) -> bool:
+    return bool(_DOC_META.match(text or ""))
 #: Bare field-label words that can head a header cell but never name a party.
 _FIELD_LABEL_WORDS = {
     "invoice", "date", "due", "po", "ref", "reference", "place", "hsn", "sac", "qty",
@@ -105,7 +142,7 @@ _FIELD_LABEL_WORDS = {
 
 
 def is_meta_line(line: str) -> bool:
-    return bool(_META_LINE.match(line) or _META_WITH_SEP.match(line))
+    return bool(_META_LINE.match(line) or _META_WITH_SEP.match(line) or _DOC_META.match(line))
 
 
 def is_label_only(line: str) -> bool:
@@ -200,6 +237,13 @@ def _trim_name(text: str) -> str:
             continue
         bare = re.sub(r"[^A-Za-z0-9]", "", tok)
         if _ADDRESS_START.match(bare) or re.fullmatch(r"\d{1,6}", bare):
+            cut = i
+            break
+        # A glued grid cell: a field label trailing the name ("XYZ Retail LLP
+        # Date 10-07-2026"). Only cut when the label is last or heads a value
+        # with digits — "National Rate Traders" keeps its "Rate".
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if bare.lower() in _FIELD_LABEL_WORDS and (not nxt or re.search(r"\d", nxt)):
             cut = i
             break
     return " ".join(tokens[:cut])
@@ -396,6 +440,49 @@ def _side_block(seg_lines: List[List[Segment]], pivot: float, side: str) -> Dict
     return parse_party_block("\n".join(lines))
 
 
+def _letterhead_above(seg_lines: List[List[Segment]], before_line: int) -> Dict:
+    """The unlabelled seller letterhead ABOVE a lone party marker — the most
+    common Indian layout: company name/GSTIN/address/contacts under the title,
+    then an invoice-info grid, then a boxed "Bill To". Grows a column window from
+    the first value segment; party meta (GSTIN/phone/email) stays in the block,
+    a document-meta label ("Invoice No.", "Order No.", "Due Date") or a party
+    marker ends it — that is where the letterhead stops and the info grid begins."""
+    start = None
+    for row in seg_lines[:before_line]:
+        for s in row:
+            if marker_kind(s.text)[0] or is_doc_meta(s.text):
+                continue
+            if _is_value_text(s.text):
+                start = s
+                break
+        if start:
+            break
+    if not start:
+        return dict(_EMPTY)
+
+    lines = [start.text]
+    lo, hi = start.x0, start.x1
+    for row in seg_lines[start.line_index + 1: before_line]:
+        stop = False
+        for s in row:
+            if not _overlaps(s, lo, hi):
+                continue
+            if marker_kind(s.text)[0] or is_doc_meta(s.text):
+                stop = True
+                break
+            lines.append(s.text)
+            lo, hi = min(lo, s.x0), max(hi, s.x1)
+        if stop:
+            break
+
+    block = parse_party_block("\n".join(lines))
+    # A lone line with nothing party-like under it is a banner/slogan strip, not
+    # a letterhead — better no seller than a confidently wrong one.
+    if len(lines) < 2 and not (block["gstin"] or block["phone"] or block["email"] or block["address"]):
+        return dict(_EMPTY)
+    return block
+
+
 def _split_at_other_marker(text: str) -> str:
     cut = re.search(r"\s*[|,]?\s*\b(?:buyer|bill(?:ed)?\s*to|seller|supplier|consignee|sold\s*by)\b",
                     text, re.IGNORECASE)
@@ -425,6 +512,13 @@ def _detect_by_geometry(page: Dict) -> Dict:
     # (a supplier letterhead beside a "Bill To" buyer, and vice-versa).
     if buyer_anchor and not seller["name"]:
         seller = _side_block(seg_lines, buyer_anchor.x0, "left")
+        if not seller["name"]:
+            # Nothing beside the marker → the letterhead above it (full-width
+            # company header stacked over the Bill To box).
+            above = _letterhead_above(seg_lines, buyer_anchor.line_index)
+            if above["name"] and above["name"] != buyer["name"] \
+                    and (not above["gstin"] or above["gstin"] != buyer["gstin"]):
+                seller = above
     elif seller_anchor and not buyer["name"]:
         buyer = _side_block(seg_lines, seller_anchor.x1, "right")
 
@@ -467,12 +561,21 @@ def _detect_by_text(text: str) -> Dict:
             buyer = parse_party_block(inline["buyer"])
             markers += 1
 
-    # Stacked blocks: a marker heads a block that runs to the next marker.
+    # Stacked blocks: a marker heads a block that runs to the next marker. An
+    # inline value trailed by other grid fields ("Buyer XYZ Retail LLP Date
+    # 10-07-2026") is a label/value GRID row — the following lines are other
+    # grid rows, not this party's block, so only the line itself is read (the
+    # geometry strategy supplies the full column block when one really exists).
+    # A clean inline name ("Bill To: Metro") keeps its block: the address and
+    # GSTIN lines below it belong to the party.
     if not seller["name"] or not buyer["name"]:
         header = lines[: _find_body_start(lines)] if _find_body_start(lines) > 0 else lines
         idx = [(i, marker_kind(line)[0]) for i, line in enumerate(header) if marker_kind(line)[0]]
         for pos, (i, kind) in enumerate(idx):
             end = idx[pos + 1][0] if pos + 1 < len(idx) else len(header)
+            inline = marker_kind(header[i])[1]
+            if inline and clean_name(_trim_name(inline)) != clean_name(inline):
+                end = i + 1
             block = parse_party_block("\n".join(header[i:end]))
             if block["name"] and not (seller if kind == "seller" else buyer)["name"]:
                 if kind == "seller":
@@ -537,7 +640,7 @@ def detect_parties(ocr: Dict) -> Dict:
     if not seller["gstin"] or not buyer["gstin"]:
         for g in find_gstins(strip_html(ocr.get("text") or "")):
             basics = derive_basics(g)
-            if seller["name"] and not seller["gstin"]:
+            if seller["name"] and not seller["gstin"] and g != buyer["gstin"]:
                 seller.update(gstin=basics["gstNo"], stateCode=basics["stateCode"],
                               stateName=basics["stateName"], pan=basics["panNo"])
             elif buyer["name"] and not buyer["gstin"] and g != seller["gstin"]:

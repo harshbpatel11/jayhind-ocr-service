@@ -7,7 +7,7 @@ whatever it read with low confidence scores so the reviewer sees the flagged gap
 """
 from typing import Dict, List
 
-from .items import build_tax_summary, parse_invoice_meta, parse_items_from_table, parse_items_from_tokens, parse_totals
+from .items import build_tax_summary, parse_invoice_meta, parse_items_from_table, parse_items_from_tokens, parse_totals, snap_gst_rate
 from .parties import detect_parties
 from .text import round2, strip_html
 
@@ -33,6 +33,36 @@ def _amounts_foot(line_items: List[Dict], totals: Dict) -> bool:
         return False
     expected = round2(totals["taxableTotal"] + totals["taxTotal"] + totals["roundOff"])
     return abs(expected - totals["grandTotal"]) <= AMOUNT_TOLERANCE
+
+
+def _resolve_gst_rate(item: Dict) -> None:
+    """Fill or repair a line's GST rate from the amounts the invoice states.
+
+    Missing rate → derive from stated CGST+SGST / IGST, else from the stated
+    line total, snapped to a real slab. A rate exactly half the effective rate
+    is a "CGST Rate" column read as the GST rate — doubled back.
+    """
+    taxable = item["taxableAmount"]
+    if not taxable:
+        return
+    stated_tax = None
+    if item["igstAmount"] is not None:
+        stated_tax = item["igstAmount"]
+    elif item["cgstAmount"] is not None and item["sgstAmount"] is not None:
+        stated_tax = round2(item["cgstAmount"] + item["sgstAmount"])
+
+    if item["gstRate"] is None:
+        derived = None
+        if stated_tax is not None:
+            derived = stated_tax / taxable * 100
+        elif item["lineTotal"]:
+            derived = (item["lineTotal"] - taxable) / taxable * 100
+        item["gstRate"] = snap_gst_rate(derived)
+    elif stated_tax is not None:
+        expected = round2(taxable * item["gstRate"] / 100)
+        doubled = round2(taxable * item["gstRate"] * 2 / 100)
+        if abs(stated_tax - expected) > AMOUNT_TOLERANCE and abs(stated_tax - doubled) <= AMOUNT_TOLERANCE:
+            item["gstRate"] = round2(item["gstRate"] * 2)
 
 
 def _score_line(item: Dict, baseline: float) -> float:
@@ -77,16 +107,22 @@ def parse_invoice(ocr: Dict) -> Dict:
     totals, cgst, sgst, igst = parsed["totals"], parsed["cgst"], parsed["sgst"], parsed["igst"]
     tax_summary = build_tax_summary(line_items, cgst, sgst, igst)
 
-    inter_state = igst is not None and igst > 0
+    inter_state = (igst is not None and igst > 0) or any(i["igstAmount"] for i in line_items)
     for item in line_items:
+        _resolve_gst_rate(item)
         if item["gstRate"] is None:
             continue
         item_tax = round2(item["taxableAmount"] * item["gstRate"] / 100)
+        # Stated amounts (read off the invoice's own CGST/SGST/IGST columns)
+        # win; the rate only fills what the document didn't print.
         if inter_state:
-            item["igstAmount"] = item_tax
+            if item["igstAmount"] is None:
+                item["igstAmount"] = item_tax
         else:
-            item["cgstAmount"] = round2(item_tax / 2)
-            item["sgstAmount"] = round2(item_tax - item["cgstAmount"])
+            if item["cgstAmount"] is None:
+                item["cgstAmount"] = round2(item_tax / 2)
+            if item["sgstAmount"] is None:
+                item["sgstAmount"] = round2(item_tax - item["cgstAmount"])
         if item["lineTotal"] is None:
             item["lineTotal"] = round2(item["taxableAmount"] + item_tax)
 

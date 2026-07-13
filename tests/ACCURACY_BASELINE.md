@@ -1,8 +1,11 @@
 # Invoice structuring — accuracy baseline
 
 Scored by `tests/accuracy_report.py` against `fixtures/layout_golden.json`
-(11 layout families reproduced from real user sample invoices). Six field checks
-per fixture: `seller`, `buyer`, `inv#`, `lines`, `taxable`, `grand` → 66 total.
+(12 layout families reproduced from real user sample invoices). Six field checks
+per fixture — `seller`, `buyer`, `inv#`, `lines`, `taxable`, `grand` — plus
+`seller_gstin` / `buyer_gstin` / `invoice_date` wherever the golden pins them
+→ **83 checks** total. The name check rejects polluted names (a trailing
+"Date 10-07-2026" fails; the old substring check let it pass).
 
 ## BEFORE — old TypeScript text-line parser (`invoice-parsing.const.ts`)
 
@@ -37,6 +40,45 @@ The win comes from reading token **geometry** (2-D party blocks, column-band
 tables) instead of flattened text lines, plus broadened column/label lexicons and
 title-bleed handling. It applies to digital PDFs (the exact text-layer path — no
 OCR model involved) and OCR output alike.
+
+## 2026-07-13 — letterhead family + stricter scoring: **83 / 83 (100%)**
+
+A 12th family (`layout_letterhead.pdf`, modelled on the user's `invoice-new-1`
+sample: unlabelled full-width company letterhead over a bordered info grid and a
+lone Bill To / Ship To box) exposed that the seller came back **completely
+empty** — the letterhead ABOVE a party marker was never read. Fixed alongside a
+hardening sweep; the goldens now also score GSTINs and the invoice date, and the
+name check rejects pollution. All checks pass on the digital path, the clean
+OCR path, and an 8°-tilt + blur + noise scan (~4s on this box):
+
+- **Seller letterhead above a lone "Bill To"** — new geometry fallback grows a
+  column window from the first value segment down to the first document-meta
+  label / party marker. A lone line with no GSTIN/address/contact under it is
+  rejected (a banner strip must not become a supplier).
+- **Document-meta lexicon** (`Order No.`, `Due Date`, `Payment Terms`, e-way,
+  IRN, vehicle…) ends letterheads and stays out of names/addresses; party meta
+  (GSTIN/PAN/phone/email) stays in.
+- **Merged OCR titles** — "TAXINVOICE" (RapidOCR drops spaces) is now
+  recognised as a title, not a seller name.
+- **Grid-row pollution** — "XYZ Retail LLP Date 10-07-2026" trims to the name;
+  the text-strategy stacked reader no longer swallows the next grid row (which
+  handed the supplier's GSTIN to the buyer).
+- **Stated tax columns** — per-line CGST/SGST/IGST and Total columns are
+  claimed explicitly (on the OCR path an unclaimed column's tokens glued onto
+  the neighbouring column, turning "18%"+"270.00" into gstRate 18270). Stated
+  amounts win over recomputation; missing GST rates are derived from stated
+  taxes or the line total and snapped to real slabs; a "CGST Rate" column read
+  as the GST rate is doubled back.
+- **Multi-slab totals** — "CGST @9% … / CGST @14% …" rows sum per-rate
+  (deduped); a plain "CGST <amt>" total row wins.
+- **Comma-as-dot amounts** — a degraded scan reads "6,372.0" as "6.372.0";
+  the trailing-amount reader now keeps that as one amount (was: grand total 0).
+- **Wrapped info-grid cells** — invoice no/date fall back to table cells
+  ("Invoice\nDate" / "12-\nJul-2026" heal to 2026-07-12).
+- Node matching (`invoice-matching.const.ts`): space-less OCR names
+  ("ABCTradersPvt.Ltd.", "WirelessKeyboard") now match — glued legal suffixes
+  peel off and character bigrams carry single-token names past the candidate
+  threshold.
 
 ## OCR engine benchmark (this aarch64 / CPU box)
 

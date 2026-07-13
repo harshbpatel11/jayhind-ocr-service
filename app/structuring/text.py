@@ -77,6 +77,10 @@ def parse_date(raw) -> Optional[str]:
     # Drop ordinal suffixes: "5th July" → "5 July".
     s = re.sub(r"\b(\d{1,2})(?:st|nd|rd|th)\b", r"\1", s, flags=re.IGNORECASE)
 
+    # Heal a date wrapped across lines inside a narrow cell ("12-\nJul-2026"
+    # collapses to "12- Jul-2026").
+    s = re.sub(r"([-/.])\s+", r"\1", s)
+
     iso = re.search(r"\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b", s)
     if iso:
         return _build_date(int(iso[1]), int(iso[2]), int(iso[3]))

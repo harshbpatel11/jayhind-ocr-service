@@ -31,7 +31,9 @@ def _name_ok(got: str, exp: str) -> bool:
         return g == ""
     if not g:
         return False
-    return g == e or e in g or g in e
+    # A polluted name ("XYZ Retail LLP Date 10-07-2026") must NOT pass — allow
+    # only a few extra characters around the expected name.
+    return g == e or g in e or (e in g and len(g) <= len(e) + 6)
 
 
 def _num_ok(got, exp) -> bool:
@@ -60,6 +62,13 @@ def main() -> int:
             ("taxable", _num_ok(inv["totals"]["taxableTotal"], g.get("taxable"))),
             ("grand", _num_ok(inv["totals"]["grandTotal"], g.get("grand"))),
         ]
+        # Stricter fields scored only where the golden pins them.
+        if g.get("seller_gstin"):
+            checks.append(("s.gst", seller["gstin"] == g["seller_gstin"]))
+        if g.get("buyer_gstin"):
+            checks.append(("b.gst", buyer["gstin"] == g["buyer_gstin"]))
+        if g.get("invoice_date"):
+            checks.append(("date", inv["invoice"]["date"] == g["invoice_date"]))
         for _, passed in checks:
             total += 1
             ok += passed

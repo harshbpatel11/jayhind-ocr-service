@@ -198,6 +198,128 @@ def test_invoice_number_voucher_label():
     assert _invoice_no_from_text("Voucher No: V-2026-77") == "V-2026-77"
 
 
+# ── letterhead / info-grid hardening (user sample invoice-new-1) ─────────────
+
+def test_doc_meta_labels():
+    from app.structuring.parties import is_doc_meta
+    assert is_doc_meta("Order No.")
+    assert is_doc_meta("Order No. SO-2026-0101")
+    assert is_doc_meta("Due Date")
+    assert is_doc_meta("Payment Terms")
+    assert is_doc_meta("Place of Supply Gujarat")
+    assert is_doc_meta("Invoice No. INV-2026-0001")
+    # Party meta must NOT be document meta — it belongs inside a party block.
+    assert not is_doc_meta("GSTIN: 24ABCDE1234F1Z5")
+    assert not is_doc_meta("Phone: +91 98765 43210")
+    assert not is_doc_meta("ABC Traders Pvt. Ltd.")
+
+
+def test_document_title_ocr_merged_words():
+    assert is_document_title("TAX INVOICE")
+    assert is_document_title("TAXINVOICE")        # OCR drops the space
+    assert is_document_title("RETAILINVOICE")
+    assert not is_document_title("ABCTradersPvt.Ltd.")
+
+
+def test_trim_name_cuts_trailing_grid_fields():
+    from app.structuring.parties import _trim_name
+    assert _trim_name("XYZ Retail LLP Date 10-07-2026") == "XYZ Retail LLP"
+    assert _trim_name("Acme Ltd Invoice") == "Acme Ltd"
+    # A label word inside a real name (no digits after it) is kept.
+    assert _trim_name("National Rate Traders") == "National Rate Traders"
+
+
+def test_wrapped_date_heals():
+    assert parse_date("12- Jul-2026") == "2026-07-12"      # cell-wrapped "12-\nJul-2026"
+
+
+def test_meta_from_wrapped_table_cells():
+    from app.structuring.items import parse_invoice_meta
+    ocr = {"text": "no labels here", "pages": [{"width": 100, "height": 100, "tokens": [], "tables": [
+        {"rows": [["Invoice\nNo.", "INV-77", "Invoice\nDate", "12-\nJul-2026"],
+                  ["Order No.", "SO-11", "Due Date", "19-Jul-2026"]]},
+    ]}]}
+    meta = parse_invoice_meta(ocr)
+    assert meta["number"] == "INV-77"
+    assert meta["date"] == "2026-07-12"                    # not the due date
+
+
+# ── stated tax columns / GST-rate resolution ──────────────────────────────────
+
+def test_item_table_reads_stated_tax_columns_and_line_total():
+    table = {"rows": [
+        ["HSN", "Product", "Qty", "Unit", "Rate", "Taxable", "GST %", "CGST", "SGST", "Total"],
+        ["8471", "Wireless Keyboard", "2", "Nos", "1,500.00", "3,000.00", "18%", "270.00", "270.00", "3,540.0"],
+    ]}
+    item = parse_items_from_table(table)[0]
+    assert item["cgstAmount"] == 270 and item["sgstAmount"] == 270
+    assert item["lineTotal"] == 3540
+    assert item["gstRate"] == 18 and item["taxableAmount"] == 3000
+
+
+def test_gst_rate_clamped_when_column_holds_amounts():
+    table = {"rows": [
+        ["Description", "Qty", "Rate", "Tax", "Amount"],
+        ["Widget", "2", "1500", "540.00", "3000"],   # "Tax" column carries amounts
+    ]}
+    assert parse_items_from_table(table)[0]["gstRate"] is None
+
+
+def test_resolve_gst_rate_derivations():
+    from app.structuring import _resolve_gst_rate
+
+    def item(**kw):
+        base = {"taxableAmount": 1000.0, "gstRate": None, "cgstAmount": None,
+                "sgstAmount": None, "igstAmount": None, "lineTotal": None}
+        base.update(kw)
+        return base
+
+    stated = item(cgstAmount=90.0, sgstAmount=90.0)
+    _resolve_gst_rate(stated)
+    assert stated["gstRate"] == 18                      # from CGST+SGST
+
+    igst = item(igstAmount=120.0)
+    _resolve_gst_rate(igst)
+    assert igst["gstRate"] == 12                        # from IGST
+
+    from_total = item(lineTotal=1050.0)
+    _resolve_gst_rate(from_total)
+    assert from_total["gstRate"] == 5                   # from line total
+
+    off_slab = item(lineTotal=1330.0)
+    _resolve_gst_rate(off_slab)
+    assert off_slab["gstRate"] is None                  # 33% snaps to nothing
+
+    halved = item(gstRate=9.0, cgstAmount=90.0, sgstAmount=90.0)
+    _resolve_gst_rate(halved)
+    assert halved["gstRate"] == 18                      # "CGST Rate" column doubled back
+
+
+def test_multi_slab_tax_totals_sum_per_rate():
+    totals = parse_totals("Taxable 6,500.00\nCGST @9% 243.00\nCGST @14% 350.00\n"
+                          "SGST @9% 243.00\nSGST @14% 350.00\n"
+                          "CGST @9% 243.00\nSGST @9% 243.00\n"   # repeated summary rows
+                          "Grand Total 7,686.00")["totals"]
+    assert totals["taxTotal"] == 1186.0                 # 243+350 twice, deduped by rate
+
+
+def test_plain_tax_total_wins_over_rated_rows():
+    # A plain "CGST <amt>" row is the document total; per-rate rows before it
+    # don't stop it from winning.
+    assert parse_totals("CGST 9% 243.00\nCGST 486.00\nGrand 5,000")["cgst"] == 486.0
+    assert parse_totals("CGST 486.00\nGrand 5,000")["cgst"] == 486.0
+
+
+def test_grand_total_survives_comma_read_as_dot():
+    # Degraded scans read "6,372.0" as "6.372.0" — one amount, not "6.372" + "0".
+    assert parse_totals("Grand Total 6.372.0")["totals"]["grandTotal"] == 6372.0
+
+
+def test_amount_in_words_label_stripped():
+    totals = parse_totals("Amount in Words: Indian Rupees Six Thousand Only\nGrand Total 6,000")["totals"]
+    assert totals["amountInWords"] == "Indian Rupees Six Thousand Only"
+
+
 # ── golden accuracy set (the layout families) ─────────────────────────────────
 
 def _golden():
@@ -210,7 +332,10 @@ def _norm(s):
 
 def _name_ok(got, exp):
     g, e = _norm(got), _norm(exp)
-    return g == "" if e == "" else bool(g) and (g == e or e in g or g in e)
+    if e == "":
+        return g == ""
+    # A polluted name must not pass — only a few extra characters are allowed.
+    return bool(g) and (g == e or g in e or (e in g and len(g) <= len(e) + 6))
 
 
 @pytest.mark.parametrize("g", _golden(), ids=lambda g: g["file"])
@@ -224,3 +349,9 @@ def test_layout_golden(g):
         assert abs(inv["totals"]["grandTotal"] - g["grand"]) <= 1
     if g["invoice_no"]:
         assert _norm(inv["invoice"]["number"]) == _norm(g["invoice_no"])
+    if g.get("seller_gstin"):
+        assert inv["seller"]["gstin"] == g["seller_gstin"]
+    if g.get("buyer_gstin"):
+        assert inv["buyer"]["gstin"] == g["buyer_gstin"]
+    if g.get("invoice_date"):
+        assert inv["invoice"]["date"] == g["invoice_date"]
