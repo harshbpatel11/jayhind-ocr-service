@@ -5,6 +5,7 @@ Ports the dependency-free primitives that used to live in the TypeScript parser
 `tests/test_structuring.py`.
 """
 import re
+import unicodedata
 from datetime import date
 from typing import Optional
 
@@ -16,6 +17,17 @@ MONTHS = {
 }
 
 _AMOUNT_CLEAN = re.compile(r"[₹$€]|\bRs\.?|\bINR\b", re.IGNORECASE)
+
+# Unicode categories that can only be decoration in front of an amount: currency
+# and other symbols, plus the unassigned/private-use/format codepoints a broken
+# font subset decodes to. Never letters or digits.
+_SYMBOL_CATEGORIES = frozenset({"Sc", "Sk", "So", "Cn", "Co", "Cf"})
+
+# A ₹ whose font ships no ToUnicode map decodes to whichever byte the subset
+# parked the glyph at — "n500" for ₹500 is the one Indian invoice templates hit
+# most. One stray letter welded to the front of an otherwise clean number is that
+# glyph, so drop it; two or more is real text ("Qty2") and must not parse.
+_MISDECODED_GLYPH = re.compile(r"^[A-Za-z](?=[\d(.-])")
 
 
 def round2(n: float) -> float:
@@ -29,10 +41,17 @@ def normalize_amount(raw) -> Optional[float]:
     Repairs the common OCR slip of reading a thousands comma as a period
     ("5.058.00"): a real amount never has two decimal points, so the last dot is
     kept as the decimal and the rest dropped.
+
+    Also repairs a currency symbol the PDF's font failed to encode, which reaches
+    us as a symbol/box/private-use codepoint or as a single stray letter ("n500").
+    Only a LEADING glyph is dropped — a trailing one is a unit ("2 PCS"), which
+    `_qty_and_unit` still needs to see.
     """
     if raw is None:
         return None
     s = _AMOUNT_CLEAN.sub("", str(raw).strip()).strip()
+    s = "".join(ch for ch in s if unicodedata.category(ch) not in _SYMBOL_CATEGORIES)
+    s = _MISDECODED_GLYPH.sub("", s.strip())
     negated = bool(re.fullmatch(r"\(.*\)", s))
     if negated:
         s = s[1:-1].strip()

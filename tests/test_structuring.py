@@ -31,6 +31,9 @@ FIXTURES = pathlib.Path(__file__).parent / "fixtures"
     ("(1,234.00)", -1234.0),           # accounting negative
     ("5.058.00", 5058.0),              # OCR read a thousands comma as a dot
     ("60770", 60770.0), ("abc", None), ("", None),
+    ("n500", 500.0), ("n1,000", 1000.0),   # ₹ from a font with no ToUnicode map
+    ("�800", 800.0), ("■2,124", 2124.0),  # …or one that lands on a box glyph
+    ("Qty2", None), ("2 PCS", None),       # real text still must not parse
 ])
 def test_normalize_amount(raw, expected):
     assert normalize_amount(raw) == expected
