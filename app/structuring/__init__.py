@@ -79,6 +79,23 @@ def _score_line(item: Dict, baseline: float) -> float:
     return round2(min(1.0, score))
 
 
+def _overall_confidence(field_confidence: Dict, line_items: List[Dict]) -> float:
+    """One headline score for the whole document.
+
+    Half the weight on the header fields (party identity, invoice number/date,
+    totals — absent fields already score 0), half on the mean line confidence.
+    No line items at all means the parser failed at its main job, so the line
+    half contributes 0 and the overall lands well under any sane threshold.
+    """
+    header = sum(field_confidence.values()) / len(field_confidence) if field_confidence else 0.0
+    lines = (
+        sum(i.get("confidence", 0) for i in line_items) / len(line_items)
+        if line_items
+        else 0.0
+    )
+    return round2(0.5 * header + 0.5 * lines)
+
+
 def parse_invoice(ocr: Dict) -> Dict:
     text = strip_html(ocr.get("text") or "")
     baseline = _baseline_confidence(ocr)
@@ -152,4 +169,5 @@ def parse_invoice(ocr: Dict) -> Dict:
         "taxSummary": tax_summary,
         "totals": totals,
         "fieldConfidence": field_confidence,
+        "overallConfidence": _overall_confidence(field_confidence, line_items),
     }

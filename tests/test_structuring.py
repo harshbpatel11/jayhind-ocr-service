@@ -358,3 +358,34 @@ def test_layout_golden(g):
         assert inv["buyer"]["gstin"] == g["buyer_gstin"]
     if g.get("invoice_date"):
         assert inv["invoice"]["date"] == g["invoice_date"]
+
+
+# ── overallConfidence (headline score for the Master Hub archive decision) ──
+
+def test_overall_confidence_present_and_bounded():
+    from app.structuring import _overall_confidence
+
+    # Perfect header + perfect lines → 1.0
+    fields = {k: 1.0 for k in range(9)}
+    lines = [{"confidence": 1.0}, {"confidence": 1.0}]
+    assert _overall_confidence(fields, lines) == 1.0
+
+    # No line items at all → the line half contributes 0 (parser failed its main job)
+    assert _overall_confidence(fields, []) == 0.5
+
+    # Empty everything → 0
+    assert _overall_confidence({}, []) == 0.0
+
+    # Mixed: header mean 0.8, line mean 0.6 → 0.7
+    fields = {"a": 0.8, "b": 0.8}
+    lines = [{"confidence": 0.5}, {"confidence": 0.7}]
+    assert _overall_confidence(fields, lines) == 0.7
+
+
+def test_parse_invoice_returns_overall_confidence():
+    from app.structuring import parse_invoice
+
+    # A minimal empty OCR result still yields the key, scored low.
+    out = parse_invoice({"method": "ocr", "text": "", "pages": []})
+    assert "overallConfidence" in out
+    assert 0.0 <= out["overallConfidence"] <= 0.3

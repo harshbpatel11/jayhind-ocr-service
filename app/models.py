@@ -98,6 +98,9 @@ class ExtractedInvoice(BaseModel):
     taxSummary: List[TaxSlab] = Field(default_factory=list)
     totals: Totals
     fieldConfidence: dict = Field(default_factory=dict)
+    #: One headline 0..1 score for the whole extraction — 50% header fields,
+    #: 50% line items. The Master Hub archives documents below its threshold.
+    overallConfidence: float = 0.0
 
 
 class ParseResponse(BaseModel):
