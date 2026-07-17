@@ -1,11 +1,13 @@
-"""Extraction engines: digital-PDF text layer (fast path) and PaddleOCR.
+"""Extraction engines: digital-PDF text layer (fast path) and OCR.
 
-Two OCR engines for the image / scanned-PDF path, chosen by `config.OCR_ENGINE`:
-  • "classic" (default) — PP-OCRv5 detection + recognition.
+Three OCR engines for the image / scanned-PDF path, chosen by `config.OCR_ENGINE`:
+  • "onnx" (default) — RapidOCR on ONNX Runtime, bundled PP-OCR models
+    (~50 MB, much faster on ARM/CPU).
+  • "classic" — PaddleOCR PP-OCRv5 detection + recognition (~2 GB; fallback).
   • "vl" — PaddleOCR-VL, a local ~0.9B vision-language model. Better on hard
     scans but far slower on CPU; falls back to classic on any error so a page is
     never left unread.
-Both emit the same page dict, so structuring downstream is engine-agnostic.
+All emit the same page dict, so structuring downstream is engine-agnostic.
 """
 import io
 import logging
