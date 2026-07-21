@@ -1,35 +1,18 @@
-# Invoice Scanning — OCR sidecar service
+# LLM invoice-OCR service — Python dependencies.
 #
-# Core (always required)
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-python-multipart==0.0.20
-pdfplumber==0.11.5          # digital-PDF text layer + word boxes
-pymupdf==1.25.2             # page rasterisation for scanned PDFs
-pillow==11.1.0
+# torch + CUDA are PRE-INSTALLED on Kaggle / Colab / most GPU-provider images, so
+# they are intentionally NOT pinned here. PaddlePaddle itself is installed by
+# run.sh from the Paddle CUDA index (it is not a normal PyPI package).
 
-# ── OCR engine: DEFAULT (OCR_ENGINE=onnx) ────────────────────────────────────
-# RapidOCR runs the PP-OCR models on ONNX Runtime. Bundled models (no download),
-# ~50 MB install, and measured on aarch64/CPU: ~8x faster than paddle AND more
-# accurate on tilted/blurred photos. Both are open source (Apache-2.0 / MIT).
-rapidocr-onnxruntime==1.4.4
-onnxruntime==1.27.0
+paddleocr>=3.2.0          # PaddleOCR-VL pipeline (the reader)
+transformers>=4.45        # extractor LLM (Qwen2.5 by default)
+accelerate>=0.34
+bitsandbytes>=0.43        # 4-bit loading for the extractor LLM
 
-# ── OCR engine: FALLBACK (OCR_ENGINE=classic) ────────────────────────────────
-# PaddleOCR. Kept as an escape hatch; not used by default. ~2 GB install.
-#
-# ⚠️ Engines are MUTUALLY EXCLUSIVE per process — onnxruntime and paddlepaddle
-# segfault when loaded together on ARM, so `app/extractor.py` only ever imports
-# the configured one. Switch engines via OCR_ENGINE, never at runtime.
-#
-# NOTE: PaddleOCR 3.x's default model (PP-OCRv6) segfaults on aarch64/ARM, and
-# multi-threaded CPU inference does too. `app/config.py` therefore pins
-# PP-OCRv5 with cpu_threads=1 — both overridable by env var.
-paddlepaddle==3.2.2
-paddleocr==3.7.0
-
-# OPTIONAL — PaddleOCR-VL local vision-language OCR engine (OCR_ENGINE=vl).
-# Adds the VLM backend; weights (~1.8 GB) download on first use. Install with:
-#     pip install "paddlex[ocr]==3.7.2"
-# ⚠️ Segfaults on aarch64/CPU inference — x86 / GPU hosts only. NOT required for
-# normal operation.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9   # multipart file upload
+pillow>=10.0              # image decode
+pymupdf>=1.24             # PDF page rasterisation
+requests>=2.31
+pyngrok>=7.0              # optional ngrok tunnel (Cloudflare needs no package)

@@ -1,211 +1,137 @@
-# OCR Service — Invoice Scanning sidecar
+# Jayhind LLM Invoice-OCR
 
-A FastAPI service that turns an uploaded invoice (PDF or image) into a
-**structured invoice** (supplier & buyer, line items, taxes, totals) — fully
-offline, no data leaves the host. It does two things:
+A small GPU service that turns an invoice (image or PDF) into a **structured GST
+invoice JSON**. Runs anywhere with a GPU — **Kaggle, Google Colab, RunPod, or any
+CUDA box** — and is called by the Jayhind ERP hub over one HTTP endpoint.
 
-- **Extraction** — reading-order text + per-token boxes (`POST /extract`).
-- **Structuring** — a geometry-first, rules-only parser converts that into the
-  `ExtractedInvoice` the NestJS backend consumes (`POST /parse`). This logic used
-  to live in TypeScript; it now lives here (`app/structuring/`) so it can read
-  token **geometry** directly, which is what makes party-name / line-item
-  detection robust across invoice layouts. Node only calls `/parse` and matches
-  the result against the DB.
+- **Reader:** PaddleOCR-VL (vision-language OCR — reads the document, keeps tables)
+- **Extractor:** an instruction LLM (Qwen2.5-7B-Instruct by default) maps the text
+  into the exact `ExtractedInvoice` contract; a deterministic pass then derives
+  GSTIN state/PAN, reconciles totals and fills defaults.
 
-See `INVOICE_SCANNING_PLAN.md` §3.1 at the project root.
+No RapidOCR, no local geometry structuring — the LLM does the reading **and** the
+structuring.
 
-## Two extraction paths (chosen automatically)
+---
 
-| Input | Path | Engine |
-|---|---|---|
-| PDF **with** an embedded text layer | `pdf-text` | `pdfplumber` — words + boxes, **no OCR** |
-| PDF **without** a text layer (scan) | `ocr` | `pymupdf` rasterises pages → PaddleOCR |
-| Image (JPG/PNG/WEBP) | `ocr` | PaddleOCR |
+## Run it (one command)
 
-PaddleOCR runs with `use_textline_orientation=True` so rotated/upside-down scan
-lines are handled. Tokens are sorted into reading order (top-to-bottom, then
-left-to-right, with a line-clustering tolerance) before the text is joined.
-
-Doc-orientation and doc-unwarping pre-models are **disabled**: invoices are
-already page-shaped, those models cost seconds per page, and they add crash
-surface on ARM. Line-level rotation is still corrected.
-
-### OCR engines
-
-`OCR_ENGINE` picks the engine for images / scanned PDFs (digital PDFs always use
-the exact text-layer path, so this only affects photographed/scanned inputs):
-
-- **`onnx`** (default) — **RapidOCR on ONNX Runtime**. Bundled PP-OCR ONNX models,
-  no download, ~50 MB. Measured on this aarch64/CPU box:
-
-  | Input | `classic` (paddle) | **`onnx`** |
-  |---|---|---|
-  | clean scan | 20.6s · 5/5 fields | **2.6s · 5/5** |
-  | low-quality photo | ~20s · 5/5 | **4.1s · 5/5** |
-  | 8° tilt + blur + noise | ~20s · **4/5** | **2.7s · 5/5** |
-
-  ~8× faster **and** more accurate on degraded scans. Hence the default.
-- **`classic`** — PaddleOCR (PP-OCRv5). The fallback engine. Model tiers via
-  `OCR_MODEL_TIER`: `fast` (mobile, 200 DPI) or `accurate` (server, 300 DPI —
-  measured **>2 min/page** on aarch64, prefer x86/GPU).
-- **`vl`** — **PaddleOCR-VL**, a local ~0.9B vision-language model (needs the
-  `paddlex[ocr]` extra; weights ~1.8 GB). x86 / GPU only — see the ARM note.
-
-All inputs are cleaned before OCR (`OCR_PREPROCESS`): grayscale → deskew → CLAHE
-local contrast → edge-preserving denoise.
-
-> ### ⚠️ ARM / aarch64 note
-> - **Engines are mutually exclusive per process.** onnxruntime and paddlepaddle
->   **segfault when loaded together**, so `extractor.py` imports only the
->   configured engine (presence is checked with `find_spec`, never an import) and
->   `onnx` never auto-falls-back to `classic` in-process. Switch via `OCR_ENGINE`.
-> - PaddleOCR 3.x's default **PP-OCRv6** models **segfault** → we pin **PP-OCRv5**.
-> - **Multi-threaded** paddle CPU inference segfaults → `cpu_threads=1`.
-> - **`OCR_ENGINE=vl` segfaults on inference** here. A SIGSEGV crashes the worker
->   and cannot be caught, so **do not enable `vl` on ARM** — x86 / GPU only.
-
-## Setup (CPU — recommended)
+On any machine with a GPU + internet:
 
 ```bash
-cd ocr-service
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt      # ~2 GB with PaddlePaddle; first run downloads models
-uvicorn app.main:app --host 0.0.0.0 --port 8100
+git clone https://github.com/harshbpatel11/jayhind-ocr-service.git
+cd jayhind-ocr-service
+bash run.sh
 ```
 
-Model weights (~10 MB detection + ~10 MB recognition + angle classifier) are
-downloaded to `~/.paddleocr/` on the first OCR request, not at install time.
+`run.sh` installs everything and starts the server + a public HTTPS tunnel, then
+prints:
 
-**Light install (digital PDFs only)** — skip the two Paddle lines in
-`requirements.txt`. The service starts fine; `/health` reports
-`"ocr_available": false` and image/scanned-PDF requests return a clear 503
-instead of crashing.
-
-### GPU
-
-Replace `paddlepaddle` with the CUDA build matching your toolkit, then set
-`OCR_USE_GPU=true`:
-
-```bash
-pip uninstall -y paddlepaddle
-pip install paddlepaddle-gpu==3.0.0   # see paddlepaddle.org.cn for the CUDA-specific wheel
-OCR_USE_GPU=true uvicorn app.main:app --port 8100
+```
+PUBLIC_URL = https://xxxxx.trycloudflare.com
+API_KEY    = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-CPU is sufficient for tens–hundreds of invoices/day (~1.5–2 GB RAM, roughly
-1–4 s per page). Reach for GPU only at thousands/day.
+**Leave it running.** First start downloads a few GB of model weights.
 
-### Docker
+### Kaggle
 
-```bash
-docker build -t trendy-ocr-service .
-docker run -p 8100:8100 -v ocr-models:/root/.paddleocr trendy-ocr-service
+1. New Notebook → settings: **Accelerator = GPU T4 x2**, **Internet = On**
+   (Internet needs a phone-verified account).
+2. In a cell:
+   ```python
+   !git clone https://github.com/harshbpatel11/jayhind-ocr-service.git
+   %cd jayhind-ocr-service
+   !bash run.sh
+   ```
+3. Copy the `PUBLIC_URL` + `API_KEY` it prints. Keep the tab open.
+
+### Google Colab
+
+Runtime → Change runtime type → **GPU**, then the same three lines as above.
+
+---
+
+## Connect it to the ERP hub
+
+In `jayhind-admin-back/.env`:
+
+```
+OCR_SERVICE_URL=<PUBLIC_URL>
+OCR_SERVICE_KEY=<API_KEY>
 ```
 
-Mount `/root/.paddleocr` so model weights survive container restarts.
+then `dev restart admin-back`. The hub sends `Authorization: Bearer <API_KEY>` on
+every call. To go back to a local engine, blank `OCR_SERVICE_KEY` and point
+`OCR_SERVICE_URL` back at it.
 
-## Configuration
+> A Cloudflare quick-tunnel URL changes every run. For a **stable URL**, set an
+> `NGROK_TOKEN` env var (get a free token at ngrok.com) — `launch.py` then uses
+> ngrok, and a reserved domain keeps the same URL across restarts.
 
-| Env var | Default | Meaning |
-|---|---|---|
-| `OCR_ENGINE` | `onnx` | `onnx` (RapidOCR/ONNX — default), `classic` (PaddleOCR fallback), `vl` (x86/GPU only) |
-| `OCR_MODEL_TIER` | `fast` | `classic` only: `fast` (mobile, 200 DPI) or `accurate` (server, 300 DPI) |
-| `OCR_PREPROCESS` | `true` | OpenCV clean-up before OCR (deskew + CLAHE contrast + denoise); OCR path only |
-| `OCR_USE_GPU` | `false` | Use the CUDA PaddlePaddle build |
-| `OCR_LANG` | `en` | PaddleOCR language pack |
-| `OCR_DET_MODEL` | tier default | Override the text-detection model |
-| `OCR_REC_MODEL` | tier default | Override the text-recognition model |
-| `OCR_CPU_THREADS` | `1` | Paddle CPU threads (>1 segfaults on ARM) |
-| `OCR_DPI` | tier default | Rasterisation DPI for scanned PDFs |
-| `OCR_MAX_PAGES` | `10` | Hard cap on pages processed per document |
-| `OCR_TEXT_LAYER_MIN_CHARS` | `120` | Chars/page needed to treat a PDF as digital |
-
-The backend reaches the service at `OCR_SERVICE_URL` (default
-`http://localhost:8100`).
+---
 
 ## API
 
-### `GET /health`
+**`GET /health`** → `{"status":"ok","engine":"paddleocr-vl","gpu":true}`
 
-```json
-{ "status": "ok", "ocr_available": true, "gpu": false }
-```
+**`POST /parse`** — `multipart/form-data`, field `file` (image or PDF), header
+`Authorization: Bearer <API_KEY>`. Returns:
 
-### `POST /extract` (multipart, field `file`)
-
-```json
+```jsonc
 {
-  "method": "pdf-text",
-  "pageCount": 1,
-  "durationMs": 84,
-  "text": "TAX INVOICE\nSeller Pvt Ltd\nGSTIN 24AAACT2727Q1ZW\n...",
-  "pages": [{
-    "index": 0,
-    "width": 612.0,
-    "height": 792.0,
-    "text": "TAX INVOICE\n...",
-    "tokens": [
-      { "text": "TAX", "bbox": [72.0, 60.1, 96.4, 72.3], "confidence": 1.0 }
-    ],
-    "tables": [ { "rows": [["Description","HSN","Qty"]] } ]
-  }]
-}
-```
-
-`confidence` is `1.0` for every token on the `pdf-text` path (the characters are
-exact, not recognised). Errors return `{"detail": "..."}` with 400 (bad file),
-415 (unsupported type) or 503 (OCR engine unavailable).
-
-### `POST /parse` (multipart, field `file`) — the production endpoint
-
-Extraction **+ structuring**: returns the `ExtractedInvoice` the backend consumes.
-
-```json
-{
-  "method": "pdf-text",
+  "method": "ocr",
   "structuringMethod": "rules",
   "pageCount": 1,
-  "durationMs": 96,
-  "text": "TAX INVOICE\n...",
+  "durationMs": 8421,
+  "text": "<full document text>",
   "invoice": {
     "schemaVersion": 1,
-    "seller": { "name": "VIJAY SALES", "gstin": "24AAHCV3778L1ZQ", "stateName": "Gujarat", "pan": "AAHCV3778L", "address": "..." },
-    "buyer":  { "name": "Jayhind", "gstin": "24AJGPP6816J1ZY", "...": "..." },
-    "invoice": { "number": "SS/2026/0412", "date": "2026-07-05" },
-    "lineItems": [ { "description": "...", "hsnSac": "8471", "quantity": 100, "rate": 250, "taxableAmount": 25000, "gstRate": 18, "cgstAmount": 2250, "sgstAmount": 2250, "igstAmount": null, "confidence": 1.0 } ],
-    "taxSummary": [ { "rate": 18, "taxableAmount": 56200, "cgst": 5058, "sgst": 5058, "igst": 0 } ],
-    "totals": { "subTotal": 56200, "discountTotal": 0, "taxableTotal": 56200, "taxTotal": 10116, "roundOff": 0, "grandTotal": 66316, "amountInWords": null },
-    "fieldConfidence": { "seller.gstin": 1.0, "seller.name": 0.9, "totals.grandTotal": 1.0 }
+    "seller": { "name", "address", "gstin", "stateCode", "stateName", "pan", "phone", "email", "pincode" },
+    "buyer":  { "...": "same shape" },
+    "invoice": { "number", "date" },
+    "lineItems": [ { "description","hsnSac","quantity","unit","rate","discount",
+                     "taxableAmount","gstRate","cgstAmount","sgstAmount","igstAmount","lineTotal","confidence" } ],
+    "taxSummary": [ { "rate","taxableAmount","cgst","sgst","igst" } ],
+    "totals": { "subTotal","discountTotal","taxableTotal","taxTotal","roundOff","grandTotal","amountInWords" },
+    "fieldConfidence": {},
+    "overallConfidence": 0.9
   }
 }
 ```
 
-`fieldConfidence` (0..1 per field) drives the review screen's "check this"
-highlights. Accuracy of the structurer is scored by
-`tests/accuracy_report.py` against `tests/fixtures/layout_golden.json`
-(see `tests/ACCURACY_BASELINE.md`).
+Error semantics (the hub depends on these): **4xx** = the document is unreadable
+(terminal), **5xx** = retryable engine/infra error.
 
-**Discounts (2026-07-21).** `totals` carries `subTotal` (Σ line gross, before
-discount) and `discountTotal` alongside a **true after-discount** `taxableTotal`,
-so a discounted invoice foots correctly and the backend can reproduce the
-printed grand total. `parse_totals` (`app/structuring/items.py`) reads a
-`Taxable`/`before tax`/`net amount` label as `taxableTotal` and falls back to
-`subTotal` when no taxable line exists (byte-identical to before for
-no-discount invoices); `discountTotal` is the labelled discount, else the
-`subTotal − taxableTotal` gap. Per-line, a `Taxable`/`Net` column outranks the
-gross `Amount`/`Total` column, and a `discount`/`less discount` **row** is
-skipped (not parsed as a fake product line). The footing check
-(`app/structuring/__init__.py _amounts_foot`) is discount-aware — it accepts
-`Σ line-nets ≈ taxableTotal` OR `≈ taxableTotal + discountTotal` — so a genuine
-whole-bill discount is not flagged low-confidence. The `layout_discount.pdf`
-golden family locks this in (accuracy scorecard: 92/92).
-
-## Tests
+Quick test:
 
 ```bash
-source .venv/bin/activate
-pip install pytest httpx
-python tests/make_fixtures.py     # regenerate the sample invoices
-pytest
+curl -H "Authorization: Bearer <API_KEY>" <PUBLIC_URL>/health
+curl -H "Authorization: Bearer <API_KEY>" -F file=@invoice.jpg <PUBLIC_URL>/parse
 ```
+
+---
+
+## Configuration (env vars)
+
+| Var | Default | Purpose |
+|---|---|---|
+| `OCR_API_KEY` | random each start | Fixed key so the hub `.env` need not change between restarts |
+| `EXTRACTOR_MODEL` | `Qwen/Qwen2.5-7B-Instruct` | The extraction LLM |
+| `NGROK_TOKEN` | — | Use ngrok (stable URL) instead of Cloudflare |
+| `PORT` | `8000` | Server port |
+| `OCR_PDF_DPI` | `200` | PDF rasterisation DPI |
+| `OCR_MAX_UPLOAD_MB` | `25` | Max upload size |
+| `PADDLE_INDEX` | CUDA 12.6 wheel index | Change to match your CUDA (`run.sh`) |
+
+## Files
+
+| File | What |
+|---|---|
+| `server.py` | FastAPI app: `/health` + `/parse`, both model stages, post-processing |
+| `launch.py` | Starts the server + tunnel, prints URL + key |
+| `run.sh` | Install deps + launch (one command) |
+| `requirements.txt` | Python deps (torch/CUDA assumed preinstalled) |
+
+> ⚠️ Invoices are your tenants' customer data. A hosted GPU + public tunnel means
+> that data leaves your box. The API key blocks outsiders; keep the URL private.
