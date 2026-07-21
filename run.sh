@@ -27,5 +27,17 @@ done
 echo "==> installing python dependencies"
 python3 -m pip install --timeout "$PIP_TIMEOUT" --retries 10 -q -r requirements.txt
 
+# The PaddleOCR-VL pipeline needs paddlex's "ocr" extra, matched to the exact
+# paddlex version that paddleocr pulled in above (installing an unpinned
+# paddlex[ocr] could drift the version). Without this the pipeline raises
+# "PaddleOCR-VL-1.6 requires additional dependencies".
+echo "==> installing PaddleOCR-VL pipeline extra (paddlex[ocr])"
+PX_VER="$(python3 -c 'import paddlex,sys; sys.stdout.write(paddlex.__version__)' 2>/dev/null || true)"
+if [ -n "$PX_VER" ]; then
+  python3 -m pip install --timeout "$PIP_TIMEOUT" --retries 10 -q "paddlex[ocr]==${PX_VER}"
+else
+  python3 -m pip install --timeout "$PIP_TIMEOUT" --retries 10 -q "paddlex[ocr]"
+fi
+
 echo "==> starting server + tunnel"
 exec python3 launch.py
