@@ -23,7 +23,13 @@ app = FastAPI(title="Invoice OCR Service", version="1.0.0")
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    return HealthResponse(status="ok", ocr_available=ocr_available(), gpu=config.USE_GPU)
+    return HealthResponse(
+        status="ok",
+        ocr_available=ocr_available(),
+        gpu=config.USE_GPU,
+        engine=config.OCR_ENGINE,
+        remote=config.OCR_REMOTE_URL if config.OCR_ENGINE == "remote" else "",
+    )
 
 
 async def _read_and_extract(file: UploadFile) -> dict:

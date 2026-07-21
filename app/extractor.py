@@ -54,6 +54,8 @@ def _onnx_importable() -> bool:
 
 def ocr_available() -> bool:
     """Whether the *configured* engine can run (reported by /health)."""
+    if config.OCR_ENGINE == "remote":
+        return bool(config.OCR_REMOTE_URL)
     if config.OCR_ENGINE == "onnx":
         return _onnx_importable()
     return _OCR_IMPORTABLE
@@ -444,6 +446,55 @@ def _run_vl_ocr(image_bytes: bytes, page_index: int) -> Dict:
     return {"index": page_index, "width": size[0], "height": size[1], "text": text, "tokens": tokens, "tables": []}
 
 
+def _run_remote_ocr(image_bytes: bytes, page_index: int) -> Dict:
+    """Send one page image to a remote OCR engine and adapt its reply.
+
+    Used when `OCR_ENGINE=remote`: PaddleOCR-VL (which segfaults on this ARM box)
+    runs on an x86/GPU host — typically Google Colab reached through a Cloudflare
+    tunnel — and returns axis-aligned tokens in the coordinate space of the image
+    it inferred on, so the local geometry-first structuring is unchanged. Any
+    network/HTTP failure raises `OcrUnavailable` → 503, which the backend treats
+    as retryable.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    if not config.OCR_REMOTE_URL:
+        raise OcrUnavailable("OCR_ENGINE=remote but OCR_REMOTE_URL is not set.")
+
+    url = f"{config.OCR_REMOTE_URL}/ocr-page"
+    headers = {"Content-Type": "image/png"}
+    if config.OCR_REMOTE_KEY:
+        headers["x-ocr-key"] = config.OCR_REMOTE_KEY
+    request = urllib.request.Request(url, data=image_bytes, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=config.OCR_REMOTE_TIMEOUT) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "ignore")[:200]
+        raise OcrUnavailable(f"Remote OCR returned HTTP {exc.code}: {body}") from exc
+    except Exception as exc:  # timeout, DNS, tunnel down, bad JSON …
+        raise OcrUnavailable(f"Remote OCR call to {url} failed: {exc}") from exc
+
+    size = (float(payload.get("width") or 0.0), float(payload.get("height") or 0.0))
+    tokens: List[Dict] = []
+    for token in payload.get("tokens") or []:
+        bbox = token.get("bbox")
+        text = str(token.get("text", "")).strip()
+        if not (bbox and text and len(bbox) >= 4):
+            continue
+        tokens.append({
+            "text": text,
+            "bbox": [float(v) for v in bbox[:4]],
+            "confidence": float(token.get("confidence", 0.9) or 0.9),
+        })
+    # Prefer local reading-order over the tokens (identical to every other engine);
+    # fall back to the remote's plain text only when it sent no geometry.
+    text = tokens_to_text(tokens) if tokens else str(payload.get("text", "")).strip()
+    return {"index": page_index, "width": size[0], "height": size[1], "text": text, "tokens": tokens, "tables": []}
+
+
 def _ocr_page(image_bytes: bytes, page_index: int) -> Dict:
     """Run the configured OCR engine on one page.
 
@@ -453,9 +504,12 @@ def _ocr_page(image_bytes: bytes, page_index: int) -> Dict:
     a failed page surfaces as an error the backend can retry.
 
     ⚠️ PaddleOCR-VL also SEGFAULTS on inference on aarch64/CPU. A SIGSEGV crashes
-    the worker and is not catchable, so `OCR_ENGINE=vl` is x86 / GPU only.
+    the worker and is not catchable, so `OCR_ENGINE=vl` is x86 / GPU only — use
+    `remote` to reach a VL server on an x86/GPU host instead.
     """
     engine = config.OCR_ENGINE
+    if engine == "remote":
+        return _run_remote_ocr(image_bytes, page_index)
     if engine == "onnx":
         return _run_onnx_ocr(image_bytes, page_index)
     if engine == "vl":

@@ -125,3 +125,8 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
     ocr_available: bool
     gpu: bool
+    #: The configured OCR engine ("onnx" | "classic" | "vl" | "remote") — lets you
+    #: confirm at a glance that OCR_ENGINE=remote actually took effect.
+    engine: str
+    #: The remote engine URL when engine == "remote" (empty otherwise).
+    remote: str = ""

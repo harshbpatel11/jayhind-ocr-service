@@ -2,6 +2,29 @@
 import os
 
 
+def _load_dotenv() -> None:
+    """Load `<repo>/.env` into the environment (real env wins, like python-dotenv).
+
+    `dev.sh` launches uvicorn without exporting per-service env, so this is how the
+    `remote` OCR engine (OCR_ENGINE / OCR_REMOTE_URL / OCR_REMOTE_KEY) gets its
+    config without editing dev.sh: just drop a `.env` next to requirements.txt.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        with open(os.path.join(root, ".env")) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+    except FileNotFoundError:
+        pass
+
+
+_load_dotenv()
+
+
 def _bool(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
 
@@ -24,10 +47,30 @@ LANG: str = os.getenv("OCR_LANG", "en")
 #:               invoice ever trips ONNX.
 #:   "vl"       — PaddleOCR-VL, a local ~0.9B vision-language model. x86/GPU only
 #:               (it segfaults on aarch64/CPU).
+#:   "remote"   — call an external OCR engine over HTTP (see OCR_REMOTE_URL). Lets
+#:               this ARM box use PaddleOCR-VL running on an x86/GPU host (e.g.
+#:               Colab) reached through a Cloudflare tunnel. Structuring still runs
+#:               locally; only the raw OCR (tokens + boxes) is remote.
 #: ⚠️ Engines are mutually exclusive per process — onnxruntime and paddlepaddle
 #: segfault when loaded together on ARM, so we never import the one we don't use.
 #: Digital PDFs always take the exact text-layer path regardless of this setting.
 OCR_ENGINE: str = os.getenv("OCR_ENGINE", "onnx").strip().lower()
+
+#: Remote OCR engine (used only when OCR_ENGINE="remote"). Base URL of a host
+#: running the PaddleOCR-VL page server (`colab/vl_server.py`); the sidecar POSTs
+#: each page's raw image bytes to `<url>/ocr-page` and gets tokens+boxes back.
+#: ⚠️ Setting this makes tenant invoice images LEAVE this box — dev/testing only
+#: unless the remote host is trusted and the link is authenticated (OCR_REMOTE_KEY).
+OCR_REMOTE_URL: str = os.getenv("OCR_REMOTE_URL", "").strip().rstrip("/")
+
+#: Shared secret sent as the `x-ocr-key` header on every remote OCR call. Must
+#: match the remote server's OCR_REMOTE_KEY. Leave blank only for a throwaway
+#: local test — a public Cloudflare URL with no key is open to the world.
+OCR_REMOTE_KEY: str = os.getenv("OCR_REMOTE_KEY", "").strip()
+
+#: Per-page timeout (seconds) for a remote OCR call. VL on a cold Colab worker
+#: (model download + first inference) can take a while; the hub allows 130s.
+OCR_REMOTE_TIMEOUT: int = _int("OCR_REMOTE_TIMEOUT", 120)
 
 #: Model tier for the classic engine:
 #:   "fast" (default) — PP-OCRv5 **mobile** models + 200 DPI. Stable and quick on
