@@ -28,11 +28,18 @@ bash run.sh
 prints:
 
 ```
-PUBLIC_URL = https://xxxxx.trycloudflare.com
+TUNNEL     = ngrok
+PUBLIC_URL = https://xxxxx.ngrok-free.app
 API_KEY    = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 **Leave it running.** First start downloads a few GB of model weights.
+
+> **Use ngrok, not a Cloudflare quick tunnel.** Set `NGROK_TOKEN` (free token at
+> ngrok.com) before `run.sh`. A `trycloudflare.com` tunnel drops any request that
+> runs longer than ~100s with **HTTP 524**, and this GPU pipeline routinely takes
+> longer than that per document — so on Cloudflare the hub reports "OCR engine is
+> unreachable". ngrok has no such response cap.
 
 ### Kaggle
 
@@ -40,6 +47,8 @@ API_KEY    = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
    (Internet needs a phone-verified account).
 2. In a cell:
    ```python
+   import os
+   os.environ['NGROK_TOKEN'] = '<your ngrok authtoken>'   # avoids the ~100s cap
    !git clone https://github.com/harshbpatel11/jayhind-ocr-service.git
    %cd jayhind-ocr-service
    !bash run.sh
@@ -48,7 +57,8 @@ API_KEY    = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 ### Google Colab
 
-Runtime → Change runtime type → **GPU**, then the same three lines as above.
+Runtime → Change runtime type → **GPU**, then the same lines as above (the
+`notebook.ipynb` in this repo has a dedicated `NGROK_TOKEN` cell).
 
 ---
 
@@ -62,12 +72,13 @@ OCR_SERVICE_KEY=<API_KEY>
 ```
 
 then `dev restart admin-back`. The hub sends `Authorization: Bearer <API_KEY>` on
-every call. To go back to a local engine, blank `OCR_SERVICE_KEY` and point
-`OCR_SERVICE_URL` back at it.
+every call, and allows up to `OCR_SERVICE_TIMEOUT_MS` (default 300000) per parse.
+To go back to a local engine, blank `OCR_SERVICE_KEY` and point `OCR_SERVICE_URL`
+back at it.
 
-> A Cloudflare quick-tunnel URL changes every run. For a **stable URL**, set an
-> `NGROK_TOKEN` env var (get a free token at ngrok.com) — `launch.py` then uses
-> ngrok, and a reserved domain keeps the same URL across restarts.
+> The tunnel URL changes every run — re-paste it into `.env` and
+> `dev restart admin-back` each time. A reserved ngrok domain (paid) keeps the
+> same URL across restarts.
 
 ---
 
@@ -118,7 +129,7 @@ curl -H "Authorization: Bearer <API_KEY>" -F file=@invoice.jpg <PUBLIC_URL>/pars
 |---|---|---|
 | `OCR_API_KEY` | random each start | Fixed key so the hub `.env` need not change between restarts |
 | `EXTRACTOR_MODEL` | `Qwen/Qwen2.5-7B-Instruct` | The extraction LLM |
-| `NGROK_TOKEN` | — | Use ngrok (stable URL) instead of Cloudflare |
+| `NGROK_TOKEN` | — | **Recommended.** Use ngrok (no ~100s response cap) instead of a Cloudflare quick tunnel |
 | `PORT` | `8000` | Server port |
 | `OCR_PDF_DPI` | `200` | PDF rasterisation DPI |
 | `OCR_MAX_UPLOAD_MB` | `25` | Max upload size |

@@ -68,15 +68,28 @@ def main():
     token = os.getenv("NGROK_TOKEN", "").strip()
     proc = None
     if token:
+        # ngrok has no ~100s response cap (unlike a Cloudflare quick tunnel), so
+        # the minutes-long PaddleOCR-VL + LLM parse can finish. Preferred engine.
         from pyngrok import ngrok
 
         ngrok.set_auth_token(token)
         url = ngrok.connect(PORT, "http").public_url
+        # ngrok exposes both schemes on one host; always hand out the https URL.
+        if url.startswith("http://"):
+            url = "https://" + url[len("http://"):]
+        tunnel = "ngrok"
     else:
+        # Cloudflare quick tunnel: no signup, but its edge times out slow origins
+        # at ~100s (HTTP 524). Fine for the fast loopback engine; set NGROK_TOKEN
+        # for the hosted GPU engine, whose parses routinely exceed that.
+        print("[launch] NGROK_TOKEN not set — using a Cloudflare quick tunnel "
+              "(~100s response cap; set NGROK_TOKEN for the hosted GPU engine).", flush=True)
         url, proc = _cloudflare_tunnel()
+        tunnel = "cloudflare"
 
     bar = "=" * 68
     print(f"\n{bar}")
+    print(f"  TUNNEL     = {tunnel}")
     print(f"  PUBLIC_URL = {url}")
     print(f"  API_KEY    = {server.API_KEY}")
     print(bar)
