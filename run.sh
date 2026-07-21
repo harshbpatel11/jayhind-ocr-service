@@ -8,11 +8,24 @@ set -e
 #   PADDLE_INDEX=https://www.paddlepaddle.org.cn/packages/stable/cu118/ bash run.sh
 PADDLE_INDEX="${PADDLE_INDEX:-https://www.paddlepaddle.org.cn/packages/stable/cu126/}"
 
-echo "==> installing PaddlePaddle-GPU"
-python3 -m pip install -q "paddlepaddle-gpu" -i "$PADDLE_INDEX"
+# The PaddlePaddle GPU wheel is ~2 GB from a slow mirror, so pip's default 15s
+# read-timeout often aborts it. Use a long timeout and retry the whole install a
+# few times (a timed-out partial download is not resumed by pip, so we restart).
+PIP_TIMEOUT="${PIP_TIMEOUT:-1000}"
+
+echo "==> installing PaddlePaddle-GPU (large download; be patient, it retries if the mirror stalls)"
+for attempt in 1 2 3 4 5; do
+  python3 -m pip install --timeout "$PIP_TIMEOUT" --retries 10 "paddlepaddle-gpu" -i "$PADDLE_INDEX" && break
+  if [ "$attempt" = 5 ]; then
+    echo "!! PaddlePaddle install failed after 5 attempts (mirror unreachable)."
+    exit 1
+  fi
+  echo "   attempt $attempt timed out — retrying in 5s ..."
+  sleep 5
+done
 
 echo "==> installing python dependencies"
-python3 -m pip install -q -r requirements.txt
+python3 -m pip install --timeout "$PIP_TIMEOUT" --retries 10 -q -r requirements.txt
 
 echo "==> starting server + tunnel"
 exec python3 launch.py
