@@ -173,6 +173,36 @@ def test_parse_totals_plain_total_is_grand():
     assert parse_totals("Milk 62\nTotal 185")["totals"]["grandTotal"] == 185
 
 
+def test_parse_totals_whole_bill_discount():
+    # Sub-total (net-of-line) and a distinct after-discount Taxable line: the
+    # Taxable wins for taxableTotal and the gap is the whole-bill discount.
+    t = parse_totals("Subtotal 42000\nDiscount 3000\nTaxable 39000\nGST @18% 7020\nTotal 46020")["totals"]
+    assert t["subTotal"] == 42000
+    assert t["taxableTotal"] == 39000        # after discount, not the sub-total
+    assert t["discountTotal"] == 3000
+    assert t["grandTotal"] == 46020
+
+
+def test_parse_totals_negative_line_discount_no_subtotal():
+    # No "Sub Total" line; a signed "Discount (5%) −750" row → positive discount.
+    t = parse_totals("Discount (5%) -750\nTaxable 14250\nGST 18% 2565\nGrand Total 16815")["totals"]
+    assert t["taxableTotal"] == 14250
+    assert t["discountTotal"] == 750
+    assert t["grandTotal"] == 16815
+
+
+def test_line_prefers_net_taxable_column_over_gross_amount():
+    # Both a gross "Amount" and a net "Taxable" column, plus a "Discount": the
+    # net (627) is the line's taxableAmount, not the gross (660).
+    table = {"rows": [
+        ["Item", "Qty", "Rate", "Amount", "Discount", "Taxable"],
+        ["Product A", "6", "110", "660.00", "5%", "627.00"],
+    ]}
+    item = parse_items_from_table(table)[0]
+    assert item["quantity"] == 6 and item["rate"] == 110
+    assert item["taxableAmount"] == 627
+
+
 # ── line items: real-world variety ────────────────────────────────────────────
 
 def test_multiline_description_merges_into_previous_item():
@@ -350,6 +380,10 @@ def test_layout_golden(g):
     assert len(inv["lineItems"]) == g["line_count"]
     if g.get("grand") is not None:
         assert abs(inv["totals"]["grandTotal"] - g["grand"]) <= 1
+    if g.get("taxable") is not None:
+        assert abs(inv["totals"]["taxableTotal"] - g["taxable"]) <= 1
+    if g.get("discount") is not None:
+        assert abs(inv["totals"]["discountTotal"] - g["discount"]) <= 1
     if g["invoice_no"]:
         assert _norm(inv["invoice"]["number"]) == _norm(g["invoice_no"])
     if g.get("seller_gstin"):

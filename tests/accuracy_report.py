@@ -63,6 +63,8 @@ def main() -> int:
             ("grand", _num_ok(inv["totals"]["grandTotal"], g.get("grand"))),
         ]
         # Stricter fields scored only where the golden pins them.
+        if g.get("discount") is not None:
+            checks.append(("disc", _num_ok(inv["totals"]["discountTotal"], g.get("discount"))))
         if g.get("seller_gstin"):
             checks.append(("s.gst", seller["gstin"] == g["seller_gstin"]))
         if g.get("buyer_gstin"):

@@ -77,6 +77,13 @@ class TaxSlab(BaseModel):
 
 
 class Totals(BaseModel):
+    #: Gross of line nets before any whole-bill discount. 0 when the invoice
+    #: prints no "Sub Total" line (then it equals `taxableTotal`).
+    subTotal: float = 0
+    #: Invoice-level (whole-bill) discount. Line-level discounts live on each
+    #: `LineItem.discount`; this is the extra deduction applied to the subtotal.
+    discountTotal: float = 0
+    #: Taxable value GST is charged on — i.e. AFTER discount.
     taxableTotal: float
     taxTotal: float
     roundOff: float

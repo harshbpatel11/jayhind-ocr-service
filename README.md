@@ -175,7 +175,7 @@ Extraction **+ structuring**: returns the `ExtractedInvoice` the backend consume
     "invoice": { "number": "SS/2026/0412", "date": "2026-07-05" },
     "lineItems": [ { "description": "...", "hsnSac": "8471", "quantity": 100, "rate": 250, "taxableAmount": 25000, "gstRate": 18, "cgstAmount": 2250, "sgstAmount": 2250, "igstAmount": null, "confidence": 1.0 } ],
     "taxSummary": [ { "rate": 18, "taxableAmount": 56200, "cgst": 5058, "sgst": 5058, "igst": 0 } ],
-    "totals": { "taxableTotal": 56200, "taxTotal": 10116, "roundOff": 0, "grandTotal": 66316, "amountInWords": null },
+    "totals": { "subTotal": 56200, "discountTotal": 0, "taxableTotal": 56200, "taxTotal": 10116, "roundOff": 0, "grandTotal": 66316, "amountInWords": null },
     "fieldConfidence": { "seller.gstin": 1.0, "seller.name": 0.9, "totals.grandTotal": 1.0 }
   }
 }
@@ -185,6 +185,21 @@ Extraction **+ structuring**: returns the `ExtractedInvoice` the backend consume
 highlights. Accuracy of the structurer is scored by
 `tests/accuracy_report.py` against `tests/fixtures/layout_golden.json`
 (see `tests/ACCURACY_BASELINE.md`).
+
+**Discounts (2026-07-21).** `totals` carries `subTotal` (Σ line gross, before
+discount) and `discountTotal` alongside a **true after-discount** `taxableTotal`,
+so a discounted invoice foots correctly and the backend can reproduce the
+printed grand total. `parse_totals` (`app/structuring/items.py`) reads a
+`Taxable`/`before tax`/`net amount` label as `taxableTotal` and falls back to
+`subTotal` when no taxable line exists (byte-identical to before for
+no-discount invoices); `discountTotal` is the labelled discount, else the
+`subTotal − taxableTotal` gap. Per-line, a `Taxable`/`Net` column outranks the
+gross `Amount`/`Total` column, and a `discount`/`less discount` **row** is
+skipped (not parsed as a fake product line). The footing check
+(`app/structuring/__init__.py _amounts_foot`) is discount-aware — it accepts
+`Σ line-nets ≈ taxableTotal` OR `≈ taxableTotal + discountTotal` — so a genuine
+whole-bill discount is not flagged low-confidence. The `layout_discount.pdf`
+golden family locks this in (accuracy scorecard: 92/92).
 
 ## Tests
 

@@ -16,8 +16,11 @@ from .text import round2, normalize_amount
 # The per-tax amount columns (CGST/SGST/IGST) are claimed explicitly — on the
 # OCR path an unclaimed column's tokens glue onto the nearest claimed centre,
 # turning "18%" + "270.00" into gstRate 18270. "CGST %" / "CGST Rate" still
-# falls through to gstRate. "Total" claims taxable on simple bills but becomes
-# the line total once a Taxable/Amount column exists.
+# falls through to gstRate. The NET taxable-value column ("Taxable"/"Net") is
+# claimed BEFORE the gross "Amount"/"Value"/"Total" column, so a layout that
+# prints BOTH (gross Amount + net Taxable, with a Discount between) maps the net
+# to `taxable` and the gross to `amount` — `_item_from_row` prefers the net and
+# otherwise derives it as amount − discount / qty*rate − discount.
 _COL_RULES = [
     ("description", re.compile(r"^(item|description|particular|particulars|goods|product|desc)\b", re.I)),
     ("hsn", re.compile(r"^(hsn|sac)\b", re.I)),
@@ -28,9 +31,10 @@ _COL_RULES = [
     ("sgstAmount", re.compile(r"^(?:sgst|utgst)\b(?!\s*(?:%|rate))", re.I)),
     ("igstAmount", re.compile(r"^igst\b(?!\s*(?:%|rate))", re.I)),
     ("gstRate", re.compile(r"^(gst|igst|cgst|sgst|utgst|tax)\s*(%|rate)?$", re.I)),
-    ("taxable", re.compile(r"^(amount|amt|value|taxable|total)\b", re.I)),
+    ("taxable", re.compile(r"^(taxable|net)\b", re.I)),
     ("discount", re.compile(r"^(disc|discount)\b", re.I)),
-    ("lineTotal", re.compile(r"^(total|net|amount|line\s*total)\b", re.I)),
+    ("amount", re.compile(r"^(amount|amt|value|total)\b", re.I)),
+    ("lineTotal", re.compile(r"^(line\s*total)\b", re.I)),
 ]
 
 #: GST slab rates a derived per-line rate is snapped to (incl. the 2025 40%
@@ -43,8 +47,11 @@ def snap_gst_rate(derived: Optional[float]) -> Optional[float]:
         return None
     slab = min(GST_SLABS, key=lambda s: abs(s - derived))
     return float(slab) if abs(slab - derived) <= 0.5 else None
-_SKIP_DESC = re.compile(r"^(total|sub\s*-?\s*total|subtotal|grand|taxable|cgst|sgst|igst|round|amount\s*in\s*words)", re.I)
-_FOOTER = re.compile(r"^\s*(sub\s*-?\s*total|subtotal|total|taxable|grand|cgst|sgst|igst|round|bank|terms|declaration|authori)", re.I)
+# Rows that are totals/tax/discount lines, not products. `discount` and a bare
+# `gst` matter for terse bills that print "Discount (5%) −750" / "GST 18% 2,565"
+# as table rows inside the item block — without them those become fake products.
+_SKIP_DESC = re.compile(r"^(total|sub\s*-?\s*total|subtotal|grand|taxable|discount|(?:c|s|i)?gst|round|amount\s*in\s*words)\b", re.I)
+_FOOTER = re.compile(r"^\s*(sub\s*-?\s*total|subtotal|total|taxable|discount|grand|(?:c|s|i)?gst|round|bank|terms|declaration|authori)\b", re.I)
 
 
 def _clean(cell) -> str:
@@ -94,8 +101,18 @@ def _item_from_row(cells: List[str], cols: Dict[str, int]) -> Optional[Dict]:
     quantity, unit_from_qty = _qty_and_unit(at("quantity"))
     rate = normalize_amount(at("rate")) or 0
     discount = normalize_amount(at("discount"))
-    taxable = normalize_amount(at("taxable"))
-    if taxable is None:
+    net = normalize_amount(at("taxable"))    # NET taxable-value column, when present
+    amount = normalize_amount(at("amount"))  # gross OR line-grand-total column
+    line_total = normalize_amount(at("lineTotal"))
+    if net is not None:
+        taxable = net
+        # With a distinct net column, an "Amount"/"Total" column is the line
+        # grand total (taxable+tax) — unless it is simply the gross (qty*rate).
+        if line_total is None and amount is not None and abs(amount - round2(quantity * rate)) > 1:
+            line_total = amount
+    elif amount is not None:
+        taxable = round2(amount - discount) if discount else amount
+    else:
         taxable = round2(quantity * rate - (discount or 0))
     gst = normalize_amount(at("gstRate").replace("%", ""))
     if gst is not None and not 0 <= gst <= 40:
@@ -112,7 +129,7 @@ def _item_from_row(cells: List[str], cols: Dict[str, int]) -> Optional[Dict]:
         "cgstAmount": normalize_amount(at("cgstAmount")),
         "sgstAmount": normalize_amount(at("sgstAmount")),
         "igstAmount": normalize_amount(at("igstAmount")),
-        "lineTotal": normalize_amount(at("lineTotal")),
+        "lineTotal": line_total,
         "confidence": 0.0,
     }
 
@@ -234,7 +251,26 @@ def _labelled_tax(lines: List[str], word: str) -> Optional[float]:
 def parse_totals(text: str) -> Dict:
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
 
-    taxable = _labelled(lines, re.compile(r"\btaxable\b|^sub\s*-?\s*total\b|\bsubtotal\b|before\s*tax", re.I)) or 0
+    # Gross of the line nets, before any whole-bill discount ("Sub Total").
+    sub_total = _labelled(lines, re.compile(r"^sub\s*-?\s*total\b|\bsub\s*total\b|\bsubtotal\b", re.I)) or 0
+    # Taxable value GST is charged on — AFTER discount. Prefer an explicit
+    # "Taxable" line; fall back to the sub-total when no discount is printed
+    # (then the two are equal — preserves behaviour on plain invoices).
+    taxable = _labelled(lines, re.compile(r"\btaxable\b|before\s*tax", re.I))
+    if taxable is None:
+        taxable = sub_total
+    taxable = taxable or 0
+
+    # Whole-bill discount: the reliable sub-total→taxable gap wins; otherwise the
+    # labelled "Discount" / "Less Discount" amount (its printed −sign is ignored).
+    discount = 0.0
+    if sub_total and taxable and sub_total - taxable > 1:
+        discount = round2(sub_total - taxable)
+    else:
+        labelled = _labelled(lines, re.compile(r"\b(?:less\s*[:\-]?\s*)?discount\b", re.I))
+        if labelled is not None:
+            discount = round2(abs(labelled))
+
     cgst = _labelled_tax(lines, "cgst")
     sgst = _labelled_tax(lines, "sgst")
     igst = _labelled_tax(lines, "igst")
@@ -256,6 +292,8 @@ def parse_totals(text: str) -> Dict:
                        "", words, flags=re.IGNORECASE).strip() or words
     return {
         "totals": {
+            "subTotal": sub_total,
+            "discountTotal": discount,
             "taxableTotal": taxable,
             "taxTotal": tax_total or round2(max(0, grand - taxable - round_off)),
             "roundOff": round_off,

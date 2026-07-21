@@ -117,5 +117,17 @@
     "line_count": 2,
     "taxable": 5400,
     "grand": 6372
+  },
+  {
+    "file": "layout_discount.pdf",
+    "seller_name": "Metro Components Pvt Ltd",
+    "buyer_name": "ABC Retail Store LLP",
+    "invoice_no": "PI-2045",
+    "seller_gstin": "24AACCM5678L1Z5",
+    "buyer_gstin": "24AAACA1234A1Z5",
+    "line_count": 2,
+    "taxable": 39000,
+    "grand": 46020,
+    "discount": 3000
   }
 ]

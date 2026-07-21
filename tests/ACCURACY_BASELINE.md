@@ -1,10 +1,10 @@
 # Invoice structuring — accuracy baseline
 
 Scored by `tests/accuracy_report.py` against `fixtures/layout_golden.json`
-(12 layout families reproduced from real user sample invoices). Six field checks
+(13 layout families reproduced from real user sample invoices). Six field checks
 per fixture — `seller`, `buyer`, `inv#`, `lines`, `taxable`, `grand` — plus
-`seller_gstin` / `buyer_gstin` / `invoice_date` wherever the golden pins them
-→ **83 checks** total. The name check rejects polluted names (a trailing
+`seller_gstin` / `buyer_gstin` / `invoice_date` / `discount` wherever the golden
+pins them → **92 checks** total. The name check rejects polluted names (a trailing
 "Date 10-07-2026" fails; the old substring check let it pass).
 
 ## BEFORE — old TypeScript text-line parser (`invoice-parsing.const.ts`)
@@ -79,6 +79,32 @@ OCR path, and an 8°-tilt + blur + noise scan (~4s on this box):
   ("ABCTradersPvt.Ltd.", "WirelessKeyboard") now match — glued legal suffixes
   peel off and character bigrams carry single-token names past the candidate
   threshold.
+
+## 2026-07-21 — discount family (invoice-level discount): **92 / 92 (100%)**
+
+A 13th family (`layout_discount.pdf`, modelled on the user's discount sample
+invoice-5) carries a **per-line discount column** *and* a **whole-bill discount**,
+with distinct `Sub Total`, `Discount` and after-discount `Taxable` footer lines
+(intra-state CGST+SGST @9%). It adds a `discount` golden field (+9 checks incl.
+`disc`). What changed in the engine to read it:
+
+- **Totals split** — `parse_totals` now returns `subTotal` (gross of line nets)
+  and `discountTotal` alongside `taxableTotal`, and `taxableTotal` prefers an
+  explicit "Taxable" line (the *after*-discount value) over "Sub Total" (so a bill
+  that prints both, like this one, yields 39,000 not 42,000). `discountTotal` is
+  the reliable `subTotal − taxableTotal` gap, else a labelled "Discount"/"Less
+  Discount" amount (printed −sign ignored).
+- **Net vs gross columns** — the line lexicon claims a net `Taxable`/`Net` column
+  before the gross `Amount`/`Value`/`Total` column, so a layout with both maps the
+  net to `taxableAmount` and treats the gross as the line total when it isn't
+  `qty×rate`. (The raw per-line `discount` cell is unreliable — it may hold "5%" —
+  so the voucher-side derivation uses `qty×rate − net`, not this cell.)
+- **Discount/GST rows are not products** — `Discount (5%) −750` / `GST 18% 2,565`
+  table rows are skipped (`_SKIP_DESC`/`_FOOTER`), where before they became fake
+  line items on terse bills.
+- **Discount-aware footing** — `_amounts_foot` accepts `Σ line-net − discountTotal
+  ≈ taxableTotal` so a legitimate whole-bill discount no longer lowers confidence;
+  `totals.discountTotal` confidence is surfaced only when a discount is present.
 
 ## OCR engine benchmark (this aarch64 / CPU box)
 

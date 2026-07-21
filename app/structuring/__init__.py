@@ -29,9 +29,12 @@ def _amounts_foot(line_items: List[Dict], totals: Dict) -> bool:
     if not line_items or not totals["grandTotal"]:
         return False
     line_sum = round2(sum(i["taxableAmount"] for i in line_items))
-    if totals["taxableTotal"] and abs(line_sum - totals["taxableTotal"]) > AMOUNT_TOLERANCE:
+    taxable = totals["taxableTotal"]
+    discount = totals.get("discountTotal") or 0
+    # Line nets reach the taxable directly (no whole-bill discount) or after it.
+    if taxable and abs(line_sum - taxable) > AMOUNT_TOLERANCE and abs(line_sum - discount - taxable) > AMOUNT_TOLERANCE:
         return False
-    expected = round2(totals["taxableTotal"] + totals["taxTotal"] + totals["roundOff"])
+    expected = round2(taxable + totals["taxTotal"] + totals["roundOff"])
     return abs(expected - totals["grandTotal"]) <= AMOUNT_TOLERANCE
 
 
@@ -73,8 +76,11 @@ def _score_line(item: Dict, baseline: float) -> float:
         score *= 0.9
     if item["quantity"] <= 0 or item["rate"] <= 0:
         score *= 0.6
-    expected = round2(item["quantity"] * item["rate"] - (item["discount"] or 0))
-    if abs(expected - item["taxableAmount"]) > AMOUNT_TOLERANCE:
+    # The net taxable must sit within [0, gross]; the implied discount is
+    # gross − net. (The raw `discount` cell is unreliable — it may hold "5%" —
+    # so it is not used to check the line.)
+    gross = round2(item["quantity"] * item["rate"])
+    if gross > 0 and not (-AMOUNT_TOLERANCE <= item["taxableAmount"] <= gross + AMOUNT_TOLERANCE):
         score *= 0.6
     return round2(min(1.0, score))
 
@@ -159,6 +165,10 @@ def parse_invoice(ocr: Dict) -> Dict:
         "totals.taxTotal": round2(baseline * math_factor) if totals["taxTotal"] else 0,
         "totals.grandTotal": round2(baseline * math_factor) if totals["grandTotal"] else 0,
     }
+    # Only surface a discount-confidence signal when the invoice actually carries
+    # a whole-bill discount — so plain invoices' overall score is unchanged.
+    if totals.get("discountTotal"):
+        field_confidence["totals.discountTotal"] = round2(baseline * math_factor)
 
     return {
         "schemaVersion": EXTRACTED_SCHEMA_VERSION,

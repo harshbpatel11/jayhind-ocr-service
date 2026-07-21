@@ -234,6 +234,29 @@ def build() -> list:
            seller_gstin="24ABCDE1234F1Z5", buyer_gstin="24AACCX1234A1Z2",
            line_count=2, taxable=5400, grand=6372)))
 
+    # 13. Per-line discount column (Disc.) + a whole-bill discount, with distinct
+    # Sub-total and after-discount Taxable lines (user discount sample invoice-5).
+    # The net "Net" column is the line taxable; the footer discount is the extra
+    # deduction (42,000 − 39,000 = 3,000). Intra-state CGST+SGST @9%.
+    specs.append(("layout_discount.pdf", _doc(f"""<h1>GST PURCHASE BILL</h1>
+      <table class=party><tr><td>Supplier</td><td>Buyer</td></tr>
+      <tr><td><b>Metro Components Pvt Ltd</b><br>18 GIDC Estate, Ahmedabad, Gujarat<br>GSTIN: 24AACCM5678L1Z5</td>
+      <td><b>ABC Retail Store LLP</b><br>Relief Road, Ahmedabad, Gujarat<br>GSTIN: 24AAACA1234A1Z5</td></tr></table>
+      <p>Invoice No PI-2045 &nbsp; Invoice Date 21-07-2026</p>
+      <table class=items>
+      <tr><th>Item</th><th>Qty</th><th>Price</th><th>Disc.</th><th>Net</th></tr>
+      <tr><td>Office Chairs</td><td class=r>10</td><td class=r>2,500</td><td class=r>2,000</td><td class=r>23,000</td></tr>
+      <tr><td>Tables</td><td class=r>4</td><td class=r>5,000</td><td class=r>1,000</td><td class=r>19,000</td></tr>
+      <tr><td colspan=3></td><td class=r>Subtotal</td><td class=r>42,000</td></tr>
+      <tr><td colspan=3></td><td class=r>Discount</td><td class=r>3,000</td></tr>
+      <tr><td colspan=3></td><td class=r>Taxable</td><td class=r>39,000</td></tr>
+      <tr><td colspan=3></td><td class=r>CGST 9%</td><td class=r>3,510</td></tr>
+      <tr><td colspan=3></td><td class=r>SGST 9%</td><td class=r>3,510</td></tr>
+      <tr><td colspan=3></td><td class=r>Grand Total</td><td class=r>46,020</td></tr></table>"""),
+      dict(seller_name="Metro Components Pvt Ltd", buyer_name="ABC Retail Store LLP",
+           invoice_no="PI-2045", seller_gstin="24AACCM5678L1Z5", buyer_gstin="24AAACA1234A1Z5",
+           line_count=2, taxable=39000, grand=46020, discount=3000)))
+
     return specs
 
 
