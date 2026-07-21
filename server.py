@@ -27,6 +27,14 @@ import secrets
 import tempfile
 import time
 
+# PaddlePaddle otherwise pre-allocates most of the GPU the moment it loads, which
+# starves the Torch extractor model on a shared single-GPU box (Colab/Kaggle) and
+# makes bitsandbytes spill to the CPU ("Some modules are dispatched on the CPU").
+# Make paddle allocate on demand and cap its share so both models coexist. Must be
+# set BEFORE paddle is imported (it reads these FLAGS at import).
+os.environ.setdefault("FLAGS_allocator_strategy", "auto_growth")
+os.environ.setdefault("FLAGS_fraction_of_gpu_memory_to_use", "0.35")
+
 import torch
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 
@@ -59,7 +67,6 @@ from paddleocr import PaddleOCRVL  # noqa: E402
 
 ocr_pipeline = PaddleOCRVL()
 
-print(f"[server] loading extractor LLM: {EXTRACTOR_MODEL} (4-bit) ...", flush=True)
 from transformers import (  # noqa: E402
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -71,10 +78,33 @@ _bnb = BitsAndBytesConfig(
     bnb_4bit_quant_type="nf4",
     bnb_4bit_compute_dtype=torch.float16,
 )
-tokenizer = AutoTokenizer.from_pretrained(EXTRACTOR_MODEL)
-llm = AutoModelForCausalLM.from_pretrained(
-    EXTRACTOR_MODEL, quantization_config=_bnb, device_map="auto"
-)
+
+
+def _load_extractor():
+    """Load the 4-bit extractor LLM, falling back to smaller Qwen models if the
+    preferred one does not fit alongside PaddleOCR-VL on a shared GPU — so the
+    service still comes up instead of crashing at import."""
+    candidates = [EXTRACTOR_MODEL]
+    for smaller in ("Qwen/Qwen2.5-3B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct"):
+        if smaller not in candidates:
+            candidates.append(smaller)
+    last_err = None
+    for name in candidates:
+        try:
+            print(f"[server] loading extractor LLM: {name} (4-bit) ...", flush=True)
+            tok = AutoTokenizer.from_pretrained(name)
+            mdl = AutoModelForCausalLM.from_pretrained(
+                name, quantization_config=_bnb, device_map="auto"
+            )
+            return tok, mdl
+        except Exception as err:  # OOM / CPU-dispatch / download issue
+            last_err = err
+            print(f"[server] {name} failed to load ({type(err).__name__}: {err}); "
+                  "trying a smaller model ...", flush=True)
+    raise RuntimeError(f"No extractor model could be loaded: {last_err}")
+
+
+tokenizer, llm = _load_extractor()
 print("[server] models ready.", flush=True)
 
 
