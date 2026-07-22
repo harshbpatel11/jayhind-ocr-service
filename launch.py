@@ -3,12 +3,20 @@
     python launch.py
 
 Loads the models (via `import server`), serves on $PORT (default 8000), opens a
-public HTTPS tunnel with a Cloudflare quick tunnel (no signup, new URL each run),
-and prints PUBLIC_URL + API_KEY. Leave it running.
+public HTTPS tunnel via Cloudflare, and prints PUBLIC_URL + API_KEY. Leave it
+running.
 
-Note: a Cloudflare quick tunnel times out any single request that runs longer
-than ~100s at the edge (HTTP 524). That is fine for fast documents; a parse that
-routinely exceeds it needs a faster engine or a tunnel without that cap.
+Two tunnel modes:
+  * Quick tunnel (default): no signup, but a NEW random trycloudflare.com URL
+    every run.
+  * Named tunnel (set CF_TUNNEL_TOKEN): a STABLE URL bound to your own domain
+    that never changes across restarts. Configure the tunnel + its public
+    hostname once in the Cloudflare Zero Trust dashboard, then export
+    CF_TUNNEL_TOKEN (and CF_TUNNEL_HOSTNAME so this script can print the URL).
+
+Note: a Cloudflare tunnel still times out any single request that runs longer
+than ~100s at the edge (HTTP 524) on free/pro plans — a named tunnel gives a
+stable URL but does NOT lift that cap.
 """
 import os
 import re
@@ -23,6 +31,11 @@ import uvicorn
 import server  # noqa: E402  (import triggers model loading)
 
 PORT = int(os.getenv("PORT", "8000"))
+# Token is a SECRET — never hardcode it (this repo is public). Pass it in Colab.
+CF_TUNNEL_TOKEN = os.getenv("CF_TUNNEL_TOKEN", "").strip()
+# Hostname is not secret, so it is baked in as the default (override with the env
+# var if you point the tunnel at a different subdomain).
+CF_TUNNEL_HOSTNAME = os.getenv("CF_TUNNEL_HOSTNAME", "ocr.aakhaja.com").strip()
 CF_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
 
 
@@ -43,11 +56,37 @@ def _wait_healthy(timeout=900) -> bool:
     return False
 
 
-def _cloudflare_tunnel():
+def _ensure_cloudflared() -> str:
     cf = os.path.join(os.getcwd(), "cloudflared")
     if not os.path.exists(cf):
         urllib.request.urlretrieve(CF_URL, cf)
         os.chmod(cf, 0o755)
+    return cf
+
+
+def _drain(proc) -> None:
+    # keep reading cloudflared's output so its stdout pipe never blocks
+    threading.Thread(target=lambda: [None for _ in proc.stdout], daemon=True).start()
+
+
+def _named_tunnel():
+    """STABLE URL: run the dashboard-managed named tunnel via its token.
+    The public hostname → http://localhost:PORT mapping is configured once in the
+    Cloudflare dashboard, so nothing to parse here — the URL is your fixed hostname.
+    """
+    cf = _ensure_cloudflared()
+    proc = subprocess.Popen(
+        [cf, "tunnel", "--no-autoupdate", "run", "--token", CF_TUNNEL_TOKEN],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+    )
+    _drain(proc)
+    url = f"https://{CF_TUNNEL_HOSTNAME}" if CF_TUNNEL_HOSTNAME else "<your configured tunnel hostname>"
+    return url, proc
+
+
+def _quick_tunnel():
+    """New random trycloudflare.com URL each run (no signup)."""
+    cf = _ensure_cloudflared()
     proc = subprocess.Popen(
         [cf, "tunnel", "--url", f"http://localhost:{PORT}", "--no-autoupdate"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
@@ -55,8 +94,7 @@ def _cloudflare_tunnel():
     for line in proc.stdout:
         m = re.search(r"https://[-a-z0-9.]+trycloudflare\.com", line)
         if m:
-            # keep draining so cloudflared's pipe never blocks
-            threading.Thread(target=lambda: [None for _ in proc.stdout], daemon=True).start()
+            _drain(proc)
             return m.group(0), proc
     return None, proc
 
@@ -67,13 +105,18 @@ def main():
     if not _wait_healthy():
         sys.exit("[launch] server did not become healthy in time")
 
-    url, proc = _cloudflare_tunnel()
+    if CF_TUNNEL_TOKEN:
+        url, proc = _named_tunnel()
+        tunnel = "cloudflare (named — stable URL)"
+    else:
+        url, proc = _quick_tunnel()
+        tunnel = "cloudflare (quick — new URL each run)"
     if not url:
         sys.exit("[launch] could not obtain a Cloudflare tunnel URL")
 
     bar = "=" * 68
     print(f"\n{bar}")
-    print("  TUNNEL     = cloudflare")
+    print(f"  TUNNEL     = {tunnel}")
     print(f"  PUBLIC_URL = {url}")
     print(f"  API_KEY    = {server.API_KEY}")
     print(bar)
@@ -81,6 +124,9 @@ def main():
     print(f"     OCR_SERVICE_URL={url}")
     print(f"     OCR_SERVICE_KEY={server.API_KEY}")
     print("  then:  dev restart admin-back")
+    if CF_TUNNEL_TOKEN:
+        print("  (named tunnel: URL + key stay fixed — set them in .env ONCE and you")
+        print("   never touch the hub again on a Colab restart)")
     print(f"{bar}\n  (leave this running; stop the cell / Ctrl-C to shut down)\n", flush=True)
 
     try:
