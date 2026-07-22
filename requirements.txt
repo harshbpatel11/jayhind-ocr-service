@@ -15,4 +15,5 @@ python-multipart>=0.0.9   # multipart file upload
 pillow>=10.0              # image decode
 pymupdf>=1.24             # PDF page rasterisation
 requests>=2.31
-pyngrok>=7.0              # optional ngrok tunnel (Cloudflare needs no package)
+# Public tunnel is a Cloudflare quick tunnel (cloudflared binary, fetched by
+# launch.py) — no Python package needed.

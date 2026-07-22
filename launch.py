@@ -1,12 +1,14 @@
-"""Start the OCR server + a public tunnel, then print the URL and API key.
+"""Start the OCR server + a public Cloudflare tunnel, then print the URL and API key.
 
     python launch.py
 
 Loads the models (via `import server`), serves on $PORT (default 8000), opens a
-public HTTPS tunnel, and prints PUBLIC_URL + API_KEY. Leave it running.
+public HTTPS tunnel with a Cloudflare quick tunnel (no signup, new URL each run),
+and prints PUBLIC_URL + API_KEY. Leave it running.
 
-Tunnel: Cloudflare quick tunnel by default (no signup, new URL each run). Set
-NGROK_TOKEN to use ngrok instead (supports a reserved domain = stable URL).
+Note: a Cloudflare quick tunnel times out any single request that runs longer
+than ~100s at the edge (HTTP 524). That is fine for fast documents; a parse that
+routinely exceeds it needs a faster engine or a tunnel without that cap.
 """
 import os
 import re
@@ -65,31 +67,13 @@ def main():
     if not _wait_healthy():
         sys.exit("[launch] server did not become healthy in time")
 
-    token = os.getenv("NGROK_TOKEN", "").strip()
-    proc = None
-    if token:
-        # ngrok has no ~100s response cap (unlike a Cloudflare quick tunnel), so
-        # the minutes-long PaddleOCR-VL + LLM parse can finish. Preferred engine.
-        from pyngrok import ngrok
-
-        ngrok.set_auth_token(token)
-        url = ngrok.connect(PORT, "http").public_url
-        # ngrok exposes both schemes on one host; always hand out the https URL.
-        if url.startswith("http://"):
-            url = "https://" + url[len("http://"):]
-        tunnel = "ngrok"
-    else:
-        # Cloudflare quick tunnel: no signup, but its edge times out slow origins
-        # at ~100s (HTTP 524). Fine for the fast loopback engine; set NGROK_TOKEN
-        # for the hosted GPU engine, whose parses routinely exceed that.
-        print("[launch] NGROK_TOKEN not set — using a Cloudflare quick tunnel "
-              "(~100s response cap; set NGROK_TOKEN for the hosted GPU engine).", flush=True)
-        url, proc = _cloudflare_tunnel()
-        tunnel = "cloudflare"
+    url, proc = _cloudflare_tunnel()
+    if not url:
+        sys.exit("[launch] could not obtain a Cloudflare tunnel URL")
 
     bar = "=" * 68
     print(f"\n{bar}")
-    print(f"  TUNNEL     = {tunnel}")
+    print("  TUNNEL     = cloudflare")
     print(f"  PUBLIC_URL = {url}")
     print(f"  API_KEY    = {server.API_KEY}")
     print(bar)
@@ -100,11 +84,7 @@ def main():
     print(f"{bar}\n  (leave this running; stop the cell / Ctrl-C to shut down)\n", flush=True)
 
     try:
-        if proc is not None:
-            proc.wait()
-        else:
-            while True:
-                time.sleep(3600)
+        proc.wait()
     except KeyboardInterrupt:
         pass
 
