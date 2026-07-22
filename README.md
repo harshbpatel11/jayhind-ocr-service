@@ -55,10 +55,12 @@ A named tunnel needs a domain on your Cloudflare account (Free plan is fine):
    string, so the key is stable too). Now the URL **and** the key stay fixed —
    set the hub `.env` once and never touch it again on a restart.
 
-> **The ~100s edge cap applies to both modes.** A Cloudflare tunnel drops any single
-> request longer than ~100s with **HTTP 524** (free/pro plans); the hub then reports
-> "OCR engine is unreachable". A named tunnel fixes the URL, **not** this cap — a
-> parse that routinely exceeds ~100s needs a faster engine.
+> **The ~100s edge cap is worked around by streaming.** A Cloudflare tunnel drops any
+> single request that sends **no data for ~100s** with **HTTP 524** (free/pro plans; a
+> named tunnel fixes the URL, not the cap). `/parse` avoids it by **streaming an NDJSON
+> heartbeat** every ~15s while the parse runs, so the connection is never idle — a
+> document can take minutes and still return. (A slow engine is still worth improving,
+> but it no longer *fails*.)
 
 ### Kaggle
 

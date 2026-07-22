@@ -14,9 +14,11 @@ Two tunnel modes:
     hostname once in the Cloudflare Zero Trust dashboard, then export
     CF_TUNNEL_TOKEN (and CF_TUNNEL_HOSTNAME so this script can print the URL).
 
-Note: a Cloudflare tunnel still times out any single request that runs longer
-than ~100s at the edge (HTTP 524) on free/pro plans — a named tunnel gives a
-stable URL but does NOT lift that cap.
+Note: a Cloudflare tunnel 524s any single request that sends NO data for ~100 s
+at the edge (free/pro plans; a named tunnel gives a stable URL but does not lift
+that cap). `/parse` sidesteps it by STREAMING a heartbeat line every ~15 s while
+the (slow, GPU) parse runs, so the connection is never idle and the 524 never
+fires — however long the document takes. See server.py's /parse.
 """
 import os
 import re

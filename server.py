@@ -18,6 +18,7 @@ Auth: every /parse request must carry `Authorization: Bearer <API_KEY>`. The key
 is read from OCR_API_KEY (set it to keep the same key across restarts) or a random
 one is generated at startup and printed by launch.py.
 """
+import asyncio
 import glob
 import io
 import json
@@ -25,6 +26,7 @@ import os
 import re
 import secrets
 import tempfile
+import threading
 import time
 
 # PaddlePaddle otherwise pre-allocates most of the GPU the moment it loads, which
@@ -37,12 +39,17 @@ os.environ.setdefault("FLAGS_fraction_of_gpu_memory_to_use", "0.35")
 
 import torch
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 
 # ─────────────────────────── configuration ──────────────────────────────────
 API_KEY = os.getenv("OCR_API_KEY", "").strip() or secrets.token_urlsafe(32)
 MAX_BYTES = int(os.getenv("OCR_MAX_UPLOAD_MB", "25")) * 1024 * 1024
 EXTRACTOR_MODEL = os.getenv("EXTRACTOR_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 PDF_DPI = int(os.getenv("OCR_PDF_DPI", "200"))
+# /parse streams a keepalive line this often while the slow GPU work runs, so a
+# document that takes minutes never trips a proxy's idle cap (Cloudflare 524 at
+# ~100 s). Well under any such cap; the number is not otherwise load-bearing.
+HEARTBEAT_SECONDS = float(os.getenv("OCR_HEARTBEAT_SECONDS", "15"))
 
 # GST state codes (first two digits of a GSTIN).
 GST_STATE = {
@@ -308,39 +315,95 @@ def health():
     return {"status": "ok", "engine": "paddleocr-vl", "gpu": torch.cuda.is_available()}
 
 
-@app.post("/parse")
-async def parse(file: UploadFile = File(...), authorization: str = Header(default="")):
-    """4xx = the document is unreadable (terminal); 5xx = retryable engine error.
-    The hub relies on this split, so never flatten one into the other."""
-    _auth(authorization)
-    started = time.monotonic()
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="Empty file")
-    if len(data) > MAX_BYTES:
-        raise HTTPException(status_code=413, detail=f"Document is larger than {MAX_BYTES // (1024 * 1024)} MB")
+# Only ONE document is parsed at a time: this box has a single GPU that both
+# PaddleOCR-VL and the extractor LLM share, so concurrent parses would race for
+# VRAM and OOM. A queued request blocks here inside its worker thread while its
+# HTTP response keeps streaming heartbeats — so waiting never idles the tunnel.
+_gpu_lock = threading.Lock()
 
-    with tempfile.TemporaryDirectory() as d:
-        try:
-            images = file_to_images(data, file.content_type, file.filename, d)
-        except UnsupportedType as exc:
-            raise HTTPException(status_code=415, detail=str(exc))
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"Could not read document: {exc}")
-        try:
-            markdown = ocr_to_markdown(images)
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"OCR engine error: {exc}")
-        if not markdown:
-            raise HTTPException(status_code=400, detail="Document appears blank or unreadable")
-        try:
-            invoice = postprocess(llm_extract(markdown))
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"Extraction error: {exc}")
-        page_count = len(images)
+
+def run_pipeline(data: bytes, content_type: str, filename: str) -> dict:
+    """The heavy read + extract, run in a worker thread off the event loop.
+
+    Raises HTTPException with the SAME status split the caller relies on:
+    4xx = the document itself is unreadable (terminal), 5xx = a retryable engine
+    error. The streaming endpoint carries that status into the final line."""
+    started = time.monotonic()
+    with _gpu_lock:
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                images = file_to_images(data, content_type, filename, d)
+            except UnsupportedType as exc:
+                raise HTTPException(status_code=415, detail=str(exc))
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Could not read document: {exc}")
+            try:
+                markdown = ocr_to_markdown(images)
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"OCR engine error: {exc}")
+            if not markdown:
+                raise HTTPException(status_code=400, detail="Document appears blank or unreadable")
+            try:
+                invoice = postprocess(llm_extract(markdown))
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"Extraction error: {exc}")
+            page_count = len(images)
 
     return {
         "method": "ocr", "structuringMethod": "rules",
         "pageCount": page_count, "durationMs": int((time.monotonic() - started) * 1000),
         "text": markdown, "invoice": invoice,
     }
+
+
+def _line(obj: dict) -> str:
+    """One NDJSON frame."""
+    return json.dumps(obj, ensure_ascii=False) + "\n"
+
+
+@app.post("/parse")
+async def parse(file: UploadFile = File(...), authorization: str = Header(default="")):
+    """Parse an invoice, STREAMING a keepalive so a slow document never trips a
+    proxy's idle timeout (a Cloudflare tunnel 524s any request that sends no data
+    for ~100 s, which a multi-page VL read + LLM extraction routinely exceeds).
+
+    The body is newline-delimited JSON:
+      * zero or more heartbeat lines  {"status":"processing","elapsedMs":N}
+      * exactly one FINAL line, either
+          {"status":"ok", ...ParseResponse...}                       (success) or
+          {"status":"error","httpStatus":4xx|5xx,"detail":"..."}     (failure)
+
+    The 4xx-terminal / 5xx-retryable split the hub depends on rides in the final
+    line's `httpStatus`, because once streaming has begun the HTTP status is
+    already 200 and can't be changed. Fast pre-stream failures (bad key, empty,
+    oversized) still fail the normal way with a real HTTP error status."""
+    _auth(authorization)
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(data) > MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"Document is larger than {MAX_BYTES // (1024 * 1024)} MB")
+    content_type, filename = file.content_type, file.filename
+
+    async def emit():
+        started = time.monotonic()
+        worker = asyncio.create_task(asyncio.to_thread(run_pipeline, data, content_type, filename))
+        # First byte immediately, then a keepalive every HEARTBEAT_SECONDS. Using
+        # asyncio.wait (not wait_for) means a finished worker's exception is NOT
+        # re-raised here — we retrieve it from .result() below, exactly once.
+        yield _line({"status": "processing", "elapsedMs": 0})
+        while not worker.done():
+            await asyncio.wait({worker}, timeout=HEARTBEAT_SECONDS)
+            if not worker.done():
+                yield _line({"status": "processing", "elapsedMs": int((time.monotonic() - started) * 1000)})
+        try:
+            result = worker.result()
+        except HTTPException as exc:
+            yield _line({"status": "error", "httpStatus": exc.status_code, "detail": str(exc.detail)})
+            return
+        except Exception as exc:  # unexpected — treat as a retryable engine error
+            yield _line({"status": "error", "httpStatus": 503, "detail": f"OCR service error: {exc}"})
+            return
+        yield _line({"status": "ok", **result})
+
+    return StreamingResponse(emit(), media_type="application/x-ndjson")
