@@ -1,19 +1,36 @@
-# LLM invoice-OCR service — Python dependencies.
+# Jayhind Invoice-OCR — runtime dependencies (local, CPU-only, ARM64/x86).
 #
-# torch + CUDA are PRE-INSTALLED on Kaggle / Colab / most GPU-provider images, so
-# they are intentionally NOT pinned here. PaddlePaddle itself is installed by
-# run.sh from the Paddle CUDA index (it is not a normal PyPI package).
+# No torch, no CUDA, no bitsandbytes: the reader is Paddle-based and the LLM runs
+# through llama.cpp. Everything here has aarch64 wheels except llama-cpp-python,
+# which compiles from source (build-essential + cmake — see scripts/install.sh).
 
-paddleocr>=3.2.0          # PaddleOCR-VL pipeline (the reader)
-transformers>=4.45        # extractor LLM (Qwen2.5 by default)
-accelerate>=0.34
-bitsandbytes>=0.43        # 4-bit loading for the extractor LLM
-
+# ── web service ──────────────────────────────────────────────────────────────
 fastapi>=0.115
 uvicorn[standard]>=0.30
-python-multipart>=0.0.9   # multipart file upload
-pillow>=10.0              # image decode
-pymupdf>=1.24             # PDF page rasterisation
-requests>=2.31
-# Public tunnel is a Cloudflare quick tunnel (cloudflared binary, fetched by
-# launch.py) — no Python package needed.
+python-multipart>=0.0.9        # multipart file upload
+pydantic>=2.7
+pydantic-settings>=2.3
+
+# ── ingestion + preprocessing ────────────────────────────────────────────────
+pillow>=10.0                   # image decode (PNG/JPG/TIFF, EXIF orientation)
+pymupdf>=1.24                  # PDF rasterise + digital-PDF text layer
+numpy>=1.26
+opencv-python-headless>=4.9    # deskew / denoise / threshold / contrast / resize
+
+# ── OCR reader — DEFAULT: RapidOCR (PP-OCR models via ONNX Runtime) ──────────
+# ONNX Runtime is CPU-stable on ARM64 (Neoverse N1). This is the default reader
+# (OCR_READER_ENGINE=rapidocr) and needs NO PaddlePaddle.
+rapidocr-onnxruntime>=1.3
+onnxruntime>=1.17
+
+# ── OCR reader — OPTIONAL: PaddleOCR-VL 1.6 / classic PP-OCR (PaddlePaddle) ──
+# More accurate, but PaddlePaddle's native CPU inference SEGFAULTS on this
+# aarch64 build (both VL and classic). Install only for the paddle engines
+# (OCR_READER_ENGINE=paddleocr-vl|paddleocr), on a host where paddle works.
+# PaddlePaddle (CPU) itself is installed by scripts/install.sh from the Paddle index.
+# paddleocr>=3.2.0
+# paddlex[ocr]>=3.2.0
+
+# ── LLM extractor (Qwen3-8B via llama.cpp, CPU) ──────────────────────────────
+llama-cpp-python>=0.3.2        # compiles llama.cpp with ARM NEON (no GPU)
+huggingface-hub>=0.24          # model download (scripts/download_models.sh)

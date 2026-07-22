@@ -1,0 +1,28 @@
+[project]
+name = "jayhind-ocr-service"
+version = "2.0.0"
+description = "Local CPU-only invoice OCR + extraction service (PaddleOCR-VL + Qwen3-8B)"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = [
+    "E501",   # long lines handled case-by-case (schema/prompt text)
+    "B008",   # FastAPI depends on calls in argument defaults (Depends/File/Header)
+    "UP042",  # (str, Enum) is intentional for JSON-friendly enum values
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = false

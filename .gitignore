@@ -2,4 +2,10 @@
 __pycache__/
 *.pyc
 *.log
-cloudflared
+.env
+artifacts/
+models/*.gguf
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+models/.cache/

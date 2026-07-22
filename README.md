@@ -1,203 +1,136 @@
-# Jayhind LLM Invoice-OCR
+# Jayhind Invoice-OCR
 
-A small GPU service that turns an invoice (image or PDF) into a **structured GST
-invoice JSON**. Runs anywhere with a GPU — **Kaggle, Google Colab, RunPod, or any
-CUDA box** — and is called by the Jayhind ERP hub over one HTTP endpoint.
+A **local, CPU-only, accuracy-first** invoice OCR + extraction service for the
+Jayhind ERP. It reads an invoice (PDF, scan, phone photo, PNG/JPG/TIFF) and
+returns a structured GST-invoice JSON (`ExtractedInvoice`, `schemaVersion 1`) —
+the exact contract the ERP's invoice-scanning flow consumes for **purchase
+invoice entry**.
 
-- **Reader:** PaddleOCR-VL (vision-language OCR — reads the document, keeps tables)
-- **Extractor:** an instruction LLM (Qwen2.5-7B-Instruct by default) maps the text
-  into the exact `ExtractedInvoice` contract; a deterministic pass then derives
-  GSTIN state/PAN, reconciles totals and fills defaults.
+Runs entirely on the box, no GPU and no network: designed for an ARM64 Ubuntu
+24.04 server (Oracle Cloud Neoverse N1, 4 vCPU / 24 GB). No Tesseract, no
+EasyOCR, no Colab, no Cloudflare tunnel, no torch.
 
-No RapidOCR, no local geometry structuring — the LLM does the reading **and** the
-structuring.
+## Pipeline
 
----
+```
+ upload (PDF / image)
+   │
+   ├─ ingest          PyMuPDF (PDF raster + digital-PDF text layer) / Pillow (PNG,JPG,TIFF,photo)
+   ├─ preprocess      OpenCV: deskew · denoise · contrast (CLAHE) · adaptive threshold · DPI upscale
+   ├─ read            RapidOCR (PP-OCR models via ONNX Runtime, CPU) → reading-order text
+   ├─ layout          typed blocks + parsed tables (merged cells, reading order)
+   ├─ rules           deterministic hints: GSTINs, invoice no/date, HSN, the line-item grid
+   ├─ extract         Qwen3-8B-Instruct (local, CPU, llama.cpp, JSON-grammar-constrained)
+   ├─ validate        GST business rules: GSTIN→state/PAN, intra/inter split, totals reconcile
+   └─ score           per-field + overall confidence → ExtractedInvoice JSON
+```
 
-## Run it (one command)
+Every stage is behind a `typing.Protocol` and wired by one composition root
+(`app/container.py`), so the reader and the extractor are swappable (the tests
+run the whole pipeline with lightweight fakes — no model downloads).
 
-On any machine with a GPU + internet:
+> **Reader note (ARM64):** the default reader is **RapidOCR** — PaddleOCR's
+> PP-OCR detection+recognition models run through **ONNX Runtime**, which is
+> CPU-stable on this Neoverse N1 box. The **PaddleOCR-VL 1.6** and classic
+> PaddleOCR readers are implemented too (`OCR_READER_ENGINE=paddleocr-vl` /
+> `paddleocr`), but PaddlePaddle's *native* CPU inference **segfaults** on this
+> aarch64 build for both — use them only on a host where paddle inference works.
+
+## Install (ARM64 / x86, CPU)
 
 ```bash
-git clone https://github.com/harshbpatel11/jayhind-ocr-service.git
-cd jayhind-ocr-service
-bash run.sh
+bash scripts/install.sh          # system build tools + venv + deps (RapidOCR/ONNX + llama.cpp)
+bash scripts/download_models.sh  # Qwen3-8B GGUF (~4.7 GB); RapidOCR fetches its ONNX models on first use
+bash scripts/serve.sh            # serve on 127.0.0.1:8100
 ```
 
-`run.sh` installs everything and starts the server + a public HTTPS tunnel, then
-prints a `PUBLIC_URL` + `API_KEY`. **Leave it running.** First start downloads a
-few GB of model weights.
+(Add the optional PaddleOCR-VL / classic readers with `INSTALL_PADDLE=1 bash
+scripts/install.sh` — only useful where paddle's CPU inference works.)
 
-**Two tunnel modes:**
-
-| Mode | How | URL |
-|---|---|---|
-| **Quick** (default) | nothing to set | new random `https://xxxxx.trycloudflare.com` each run |
-| **Named** (recommended) | set `CF_TUNNEL_TOKEN` | a **fixed** hostname you own, e.g. `https://ocr.aakhaja.com` — never changes |
-
-```
-TUNNEL     = cloudflare (named — stable URL)
-PUBLIC_URL = https://ocr.aakhaja.com
-API_KEY    = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-### Stable URL — one-time setup
-
-A named tunnel needs a domain on your Cloudflare account (Free plan is fine):
-
-1. **Zero Trust → Networks → Tunnels → Create a tunnel** → connector **Cloudflared**
-   → name it → copy the **token** (the `eyJ...` string after `--token`). Don't run
-   the install commands it shows — `run.sh` runs `cloudflared` for you.
-2. **Route tunnel → Public hostname:** subdomain `ocr`, your domain, service
-   `HTTP` → `localhost:8000`. Save (this auto-creates the DNS).
-3. Run with two env vars set (both are **secrets** — never commit them):
-   `CF_TUNNEL_TOKEN` (from step 1) and a fixed `OCR_API_KEY` (any long random
-   string, so the key is stable too). Now the URL **and** the key stay fixed —
-   set the hub `.env` once and never touch it again on a restart.
-
-> **The ~100s edge cap is worked around by streaming.** A Cloudflare tunnel drops any
-> single request that sends **no data for ~100s** with **HTTP 524** (free/pro plans; a
-> named tunnel fixes the URL, not the cap). `/parse` avoids it by **streaming an NDJSON
-> heartbeat** every ~15s while the parse runs, so the connection is never idle — a
-> document can take minutes and still return. (A slow engine is still worth improving,
-> but it no longer *fails*.)
-
-### Kaggle
-
-1. New Notebook → settings: **Accelerator = GPU T4 x2**, **Internet = On**
-   (Internet needs a phone-verified account).
-2. In a cell (set the two secrets for a stable URL; omit `CF_TUNNEL_TOKEN` for a
-   quick tunnel):
-   ```python
-   import os
-   os.environ['CF_TUNNEL_TOKEN'] = '<your named-tunnel token>'
-   os.environ['OCR_API_KEY']     = '<a long random key you reuse>'
-   !git clone https://github.com/harshbpatel11/jayhind-ocr-service.git
-   %cd jayhind-ocr-service
-   !bash run.sh
-   ```
-3. Copy the `PUBLIC_URL` + `API_KEY` it prints. Keep the tab open.
-
-### Google Colab
-
-Runtime → Change runtime type → **GPU**, then the same lines as above. The
-`notebook.ipynb` in this repo runs the same steps cell by cell and reads the two
-secrets from Colab's **Secrets** panel (🔑) so they never get saved into the
-notebook — add `CF_TUNNEL_TOKEN` and `OCR_API_KEY` there.
-
-### Fast repeat runs — cache deps + models (skip re-downloading)
-
-Colab/Kaggle wipe the runtime when a session ends, so a fresh session otherwise
-reinstalls everything from zero — the ~2 GB PaddlePaddle wheel (slow mirror) plus
-the model weights. Point **`CACHE_DIR`** at storage that survives a restart and
-`run.sh` caches the pip wheels + model weights there; the next cold start reuses
-them:
-
-```python
-# Colab — cache to Google Drive (authorise the mount once):
-from google.colab import drive; drive.mount('/content/drive')
-import os; os.environ['CACHE_DIR'] = '/content/drive/MyDrive/jayhind-ocr-cache'
-```
-
-`CACHE_DIR` sets `PIP_CACHE_DIR` (cached wheels — the big, reliable win, kills the
-slow Paddle re-download), `HF_HOME` (the extractor LLM), and `~/.paddlex` (the
-PaddleOCR-VL reader). The bundled `notebook.ipynb` has this as **cell 3**.
-
-Notes:
-- **Free Drive is 15 GB** — the default `Qwen2.5-7B` weights (~15 GB) barely fit.
-  On Colab set `EXTRACTOR_MODEL=Qwen/Qwen2.5-3B-Instruct` (~6 GB) so the cache fits
-  comfortably, or use a paid Drive.
-- Drive reads are slower than local disk, so the model-load step won't be instant —
-  the guaranteed saving is not re-downloading the Paddle wheel every session.
-- **Kaggle:** Drive isn't available — save the cache folder as a **Dataset** once and
-  attach it, then set `CACHE_DIR=/kaggle/input/<your-dataset>`.
-
----
-
-## Connect it to the ERP hub
-
-In `jayhind-admin-back/.env`:
-
-```
-OCR_SERVICE_URL=<PUBLIC_URL>
-OCR_SERVICE_KEY=<API_KEY>
-```
-
-then `dev restart admin-back`. The hub sends `Authorization: Bearer <API_KEY>` on
-every call, and allows up to `OCR_SERVICE_TIMEOUT_MS` (default 300000) per parse.
-To go back to a local engine, blank `OCR_SERVICE_KEY` and point `OCR_SERVICE_URL`
-back at it.
-
-> With a **quick** tunnel the URL changes every run — re-paste it into `.env` and
-> `dev restart admin-back` each time. With a **named** tunnel + a fixed
-> `OCR_API_KEY`, both values stay constant: set `.env` once and skip this on every
-> future restart.
-
----
+Or under the workspace tmux runner: `dev start ocr` (see `dev.sh`).
 
 ## API
 
-**`GET /health`** → `{"status":"ok","engine":"paddleocr-vl","gpu":true}`
+`GET /health` → `{"status":"ok","engine":"rapidocr","extractor":"qwen3-8b-instruct","reader_ready":true,"extractor_ready":true,"version":"2.0.0","gpu":false}`
 
-**`POST /parse`** — `multipart/form-data`, field `file` (image or PDF), header
-`Authorization: Bearer <API_KEY>`. Returns:
+`POST /parse` — `multipart/form-data`, field `file`. Returns **plain JSON**
+(the loopback hub proxy reads `response.json()` directly):
 
 ```jsonc
 {
-  "method": "ocr",
+  "method": "ocr",              // or "pdf-text" for a digital PDF
   "structuringMethod": "rules",
   "pageCount": 1,
-  "durationMs": 8421,
-  "text": "<full document text>",
+  "durationMs": 84210,
+  "text": "…reading-order text…",
   "invoice": {
     "schemaVersion": 1,
-    "seller": { "name", "address", "gstin", "stateCode", "stateName", "pan", "phone", "email", "pincode" },
-    "buyer":  { "...": "same shape" },
-    "invoice": { "number", "date" },
+    "seller": { "name","address","gstin","stateCode","stateName","pan","phone","email","pincode" },
+    "buyer":  { "…same…" },
+    "invoice": { "number","date" },
     "lineItems": [ { "description","hsnSac","quantity","unit","rate","discount",
                      "taxableAmount","gstRate","cgstAmount","sgstAmount","igstAmount","lineTotal","confidence" } ],
     "taxSummary": [ { "rate","taxableAmount","cgst","sgst","igst" } ],
     "totals": { "subTotal","discountTotal","taxableTotal","taxTotal","roundOff","grandTotal","amountInWords" },
-    "fieldConfidence": {},
+    "fieldConfidence": { "seller.gstin": 0.97, "totals.grandTotal": 0.98 },
     "overallConfidence": 0.9
   }
 }
 ```
 
-Error semantics (the hub depends on these): **4xx** = the document is unreadable
-(terminal), **5xx** = retryable engine/infra error.
+`POST /extract` — raw reader passthrough (`text` + `markdown`) for QA/debugging.
 
-Quick test:
+**Error semantics (the hub depends on these): `4xx` = document unreadable
+(terminal), `5xx` = retryable engine error.**
+
+Auth is **off** for the loopback deployment; set `OCR_API_KEY` to require
+`Authorization: Bearer <key>` (must match the hub's `OCR_SERVICE_KEY`).
+
+## Performance — accuracy over speed
+
+The stated targets (1 pg < 4 s, 20 pg < 60 s, 50 pg < 2 min) are met by the
+**OCR + layout + rules** stages. The **Qwen3-8B extractor on a 4-vCPU CPU** runs
+at only a few tokens/second, so a single invoice's extraction takes **tens of
+seconds to minutes** — a deliberate trade-off: this service is tuned for maximum
+extraction accuracy, not latency (that is why the hub/child OCR timeouts are 10+
+minutes). To trade accuracy for speed, point `OCR_LLM_MODEL_PATH` at a smaller
+GGUF (Qwen3-4B / 1.7B) or set `OCR_EXTRACTOR_ENGINE=rules` (deterministic,
+model-free).
 
 ```bash
-curl -H "Authorization: Bearer <API_KEY>" <PUBLIC_URL>/health
-curl -H "Authorization: Bearer <API_KEY>" -F file=@invoice.jpg <PUBLIC_URL>/parse
+python scripts/benchmark.py --file tests/fixtures/sample_invoice.pdf
+python scripts/loadtest.py  --file tests/fixtures/sample_invoice.pdf --requests 20 --concurrency 4
 ```
 
----
+## Configuration
 
-## Configuration (env vars)
+All env vars are `OCR_`-prefixed with production-safe defaults — see
+[.env.example](.env.example) and [app/config.py](app/config.py).
 
-| Var | Default | Purpose |
-|---|---|---|
-| `OCR_API_KEY` | random each start | Fixed key so the hub `.env` need not change between restarts |
-| `CF_TUNNEL_TOKEN` | — | **Secret.** Set it to run a named Cloudflare tunnel (stable URL). Unset ⇒ quick tunnel |
-| `CF_TUNNEL_HOSTNAME` | `ocr.aakhaja.com` | The named tunnel's public hostname (for the printed `PUBLIC_URL`) |
-| `CACHE_DIR` | — | Persistent dir (e.g. Google Drive) for cached pip wheels + model weights, so repeat sessions skip the big downloads |
-| `EXTRACTOR_MODEL` | `Qwen/Qwen2.5-7B-Instruct` | The extraction LLM (set `Qwen/Qwen2.5-3B-Instruct` on Colab to fit a free Drive) |
-| `PORT` | `8000` | Server port |
-| `OCR_PDF_DPI` | `200` | PDF rasterisation DPI |
-| `OCR_MAX_UPLOAD_MB` | `25` | Max upload size |
-| `PADDLE_INDEX` | CUDA 12.6 wheel index | Change to match your CUDA (`run.sh`) |
+## Tests & quality
 
-## Files
+```bash
+.venv/bin/python -m pytest      # 82 unit + integration tests (no models needed)
+.venv/bin/ruff check app tests  # PEP 8
+```
 
-| File | What |
+Type hints throughout, async I/O, repository pattern + dependency injection,
+reusable single-purpose modules.
+
+## Project layout
+
+| Path | What |
 |---|---|
-| `server.py` | FastAPI app: `/health` + `/parse`, both model stages, post-processing |
-| `launch.py` | Starts the server + tunnel, prints URL + key |
-| `run.sh` | Install deps + launch (one command) |
-| `requirements.txt` | Python deps (torch/CUDA assumed preinstalled) |
-
-> ⚠️ Invoices are your tenants' customer data. A hosted GPU + public tunnel means
-> that data leaves your box. The API key blocks outsiders; keep the URL private.
+| `app/domain/` | wire contract (`models.py`), pipeline types, stage `Protocol`s |
+| `app/ingestion/` | upload → page images (PDF/image/TIFF, text-layer fast path) |
+| `app/preprocessing/` | OpenCV deskew/denoise/threshold/contrast/resize |
+| `app/ocr/` | RapidOCR reader (default) + PaddleOCR-VL / classic readers + null reader |
+| `app/layout/` | markdown → typed blocks + parsed tables |
+| `app/rules/` | GST rules, dates, pre-LLM hints, business-rule validation |
+| `app/extraction/` | Qwen3-8B (llama.cpp) + rules fallback + prompt/JSON |
+| `app/confidence/` | per-field + overall confidence |
+| `app/pipeline/` | orchestrator + typed errors |
+| `app/container.py` | composition root (DI) |
+| `app/api/` + `app/main.py` | FastAPI routes + app factory |
+| `scripts/` | install / download / serve / benchmark / loadtest |
+| `tests/` | pytest suite + `fixtures/sample_invoice.pdf` |
