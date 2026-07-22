@@ -24,29 +24,52 @@ cd jayhind-ocr-service
 bash run.sh
 ```
 
-`run.sh` installs everything and starts the server + a public HTTPS tunnel
-(a Cloudflare quick tunnel — no signup, new URL each run), then prints:
+`run.sh` installs everything and starts the server + a public HTTPS tunnel, then
+prints a `PUBLIC_URL` + `API_KEY`. **Leave it running.** First start downloads a
+few GB of model weights.
+
+**Two tunnel modes:**
+
+| Mode | How | URL |
+|---|---|---|
+| **Quick** (default) | nothing to set | new random `https://xxxxx.trycloudflare.com` each run |
+| **Named** (recommended) | set `CF_TUNNEL_TOKEN` | a **fixed** hostname you own, e.g. `https://ocr.aakhaja.com` — never changes |
 
 ```
-TUNNEL     = cloudflare
-PUBLIC_URL = https://xxxxx.trycloudflare.com
+TUNNEL     = cloudflare (named — stable URL)
+PUBLIC_URL = https://ocr.aakhaja.com
 API_KEY    = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-**Leave it running.** First start downloads a few GB of model weights.
+### Stable URL — one-time setup
 
-> **Heads up — the ~100s edge cap.** A Cloudflare quick tunnel drops any single
-> request that runs longer than ~100s with **HTTP 524**; the hub then reports
-> "OCR engine is unreachable". Fine for fast documents — but if a parse routinely
-> takes longer, you need a faster engine or a tunnel without that cap.
+A named tunnel needs a domain on your Cloudflare account (Free plan is fine):
+
+1. **Zero Trust → Networks → Tunnels → Create a tunnel** → connector **Cloudflared**
+   → name it → copy the **token** (the `eyJ...` string after `--token`). Don't run
+   the install commands it shows — `run.sh` runs `cloudflared` for you.
+2. **Route tunnel → Public hostname:** subdomain `ocr`, your domain, service
+   `HTTP` → `localhost:8000`. Save (this auto-creates the DNS).
+3. Run with two env vars set (both are **secrets** — never commit them):
+   `CF_TUNNEL_TOKEN` (from step 1) and a fixed `OCR_API_KEY` (any long random
+   string, so the key is stable too). Now the URL **and** the key stay fixed —
+   set the hub `.env` once and never touch it again on a restart.
+
+> **The ~100s edge cap applies to both modes.** A Cloudflare tunnel drops any single
+> request longer than ~100s with **HTTP 524** (free/pro plans); the hub then reports
+> "OCR engine is unreachable". A named tunnel fixes the URL, **not** this cap — a
+> parse that routinely exceeds ~100s needs a faster engine.
 
 ### Kaggle
 
 1. New Notebook → settings: **Accelerator = GPU T4 x2**, **Internet = On**
    (Internet needs a phone-verified account).
-2. In a cell:
+2. In a cell (set the two secrets for a stable URL; omit `CF_TUNNEL_TOKEN` for a
+   quick tunnel):
    ```python
    import os
+   os.environ['CF_TUNNEL_TOKEN'] = '<your named-tunnel token>'
+   os.environ['OCR_API_KEY']     = '<a long random key you reuse>'
    !git clone https://github.com/harshbpatel11/jayhind-ocr-service.git
    %cd jayhind-ocr-service
    !bash run.sh
@@ -55,8 +78,10 @@ API_KEY    = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 ### Google Colab
 
-Runtime → Change runtime type → **GPU**, then the same lines as above (the
-`notebook.ipynb` in this repo runs the same steps cell by cell).
+Runtime → Change runtime type → **GPU**, then the same lines as above. The
+`notebook.ipynb` in this repo runs the same steps cell by cell and reads the two
+secrets from Colab's **Secrets** panel (🔑) so they never get saved into the
+notebook — add `CF_TUNNEL_TOKEN` and `OCR_API_KEY` there.
 
 ---
 
@@ -74,9 +99,10 @@ every call, and allows up to `OCR_SERVICE_TIMEOUT_MS` (default 300000) per parse
 To go back to a local engine, blank `OCR_SERVICE_KEY` and point `OCR_SERVICE_URL`
 back at it.
 
-> The tunnel URL changes every run — re-paste it into `.env` and
-> `dev restart admin-back` each time. A named Cloudflare tunnel bound to your own
-> domain keeps the same URL across restarts.
+> With a **quick** tunnel the URL changes every run — re-paste it into `.env` and
+> `dev restart admin-back` each time. With a **named** tunnel + a fixed
+> `OCR_API_KEY`, both values stay constant: set `.env` once and skip this on every
+> future restart.
 
 ---
 
@@ -126,6 +152,8 @@ curl -H "Authorization: Bearer <API_KEY>" -F file=@invoice.jpg <PUBLIC_URL>/pars
 | Var | Default | Purpose |
 |---|---|---|
 | `OCR_API_KEY` | random each start | Fixed key so the hub `.env` need not change between restarts |
+| `CF_TUNNEL_TOKEN` | — | **Secret.** Set it to run a named Cloudflare tunnel (stable URL). Unset ⇒ quick tunnel |
+| `CF_TUNNEL_HOSTNAME` | `ocr.aakhaja.com` | The named tunnel's public hostname (for the printed `PUBLIC_URL`) |
 | `EXTRACTOR_MODEL` | `Qwen/Qwen2.5-7B-Instruct` | The extraction LLM |
 | `PORT` | `8000` | Server port |
 | `OCR_PDF_DPI` | `200` | PDF rasterisation DPI |
