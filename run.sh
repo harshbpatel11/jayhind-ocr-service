@@ -9,6 +9,21 @@
 # downloads instead of installing from zero.
 set -e
 
+# ---- GPU preflight --------------------------------------------------------
+# PaddleOCR-VL + the LLM extractor are GPU-only. Fail FAST with a clear message
+# if no NVIDIA GPU is attached, instead of installing ~2 GB of GPU wheels and
+# then dying deep inside paddle with "libcuda.so.1: cannot open shared object
+# file" — which only ever means "this runtime has no GPU".
+if ! command -v nvidia-smi >/dev/null 2>&1 || ! nvidia-smi >/dev/null 2>&1; then
+  echo "!! No NVIDIA GPU detected on this runtime."
+  echo "   This service needs a GPU (PaddleOCR-VL + the extractor LLM are GPU-only)."
+  echo "   Colab:  Runtime -> Change runtime type -> Hardware accelerator = GPU (T4),"
+  echo "           then Reconnect and re-run the cells."
+  echo "   Kaggle: Notebook settings -> Accelerator = GPU T4 x2, Internet = On."
+  echo "   Verify with:  nvidia-smi   (it must print a GPU table)."
+  exit 1
+fi
+
 # PaddlePaddle GPU wheel. Default is the CUDA 12.6 index (Kaggle/Colab use CUDA 12.x).
 # If it fails, check your CUDA with `nvcc --version` and override, e.g.:
 #   PADDLE_INDEX=https://www.paddlepaddle.org.cn/packages/stable/cu118/ bash run.sh
