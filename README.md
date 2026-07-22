@@ -83,6 +83,33 @@ Runtime → Change runtime type → **GPU**, then the same lines as above. The
 secrets from Colab's **Secrets** panel (🔑) so they never get saved into the
 notebook — add `CF_TUNNEL_TOKEN` and `OCR_API_KEY` there.
 
+### Fast repeat runs — cache deps + models (skip re-downloading)
+
+Colab/Kaggle wipe the runtime when a session ends, so a fresh session otherwise
+reinstalls everything from zero — the ~2 GB PaddlePaddle wheel (slow mirror) plus
+the model weights. Point **`CACHE_DIR`** at storage that survives a restart and
+`run.sh` caches the pip wheels + model weights there; the next cold start reuses
+them:
+
+```python
+# Colab — cache to Google Drive (authorise the mount once):
+from google.colab import drive; drive.mount('/content/drive')
+import os; os.environ['CACHE_DIR'] = '/content/drive/MyDrive/jayhind-ocr-cache'
+```
+
+`CACHE_DIR` sets `PIP_CACHE_DIR` (cached wheels — the big, reliable win, kills the
+slow Paddle re-download), `HF_HOME` (the extractor LLM), and `~/.paddlex` (the
+PaddleOCR-VL reader). The bundled `notebook.ipynb` has this as **cell 3**.
+
+Notes:
+- **Free Drive is 15 GB** — the default `Qwen2.5-7B` weights (~15 GB) barely fit.
+  On Colab set `EXTRACTOR_MODEL=Qwen/Qwen2.5-3B-Instruct` (~6 GB) so the cache fits
+  comfortably, or use a paid Drive.
+- Drive reads are slower than local disk, so the model-load step won't be instant —
+  the guaranteed saving is not re-downloading the Paddle wheel every session.
+- **Kaggle:** Drive isn't available — save the cache folder as a **Dataset** once and
+  attach it, then set `CACHE_DIR=/kaggle/input/<your-dataset>`.
+
 ---
 
 ## Connect it to the ERP hub
@@ -154,7 +181,8 @@ curl -H "Authorization: Bearer <API_KEY>" -F file=@invoice.jpg <PUBLIC_URL>/pars
 | `OCR_API_KEY` | random each start | Fixed key so the hub `.env` need not change between restarts |
 | `CF_TUNNEL_TOKEN` | — | **Secret.** Set it to run a named Cloudflare tunnel (stable URL). Unset ⇒ quick tunnel |
 | `CF_TUNNEL_HOSTNAME` | `ocr.aakhaja.com` | The named tunnel's public hostname (for the printed `PUBLIC_URL`) |
-| `EXTRACTOR_MODEL` | `Qwen/Qwen2.5-7B-Instruct` | The extraction LLM |
+| `CACHE_DIR` | — | Persistent dir (e.g. Google Drive) for cached pip wheels + model weights, so repeat sessions skip the big downloads |
+| `EXTRACTOR_MODEL` | `Qwen/Qwen2.5-7B-Instruct` | The extraction LLM (set `Qwen/Qwen2.5-3B-Instruct` on Colab to fit a free Drive) |
 | `PORT` | `8000` | Server port |
 | `OCR_PDF_DPI` | `200` | PDF rasterisation DPI |
 | `OCR_MAX_UPLOAD_MB` | `25` | Max upload size |
