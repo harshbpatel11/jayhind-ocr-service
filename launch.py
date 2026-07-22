@@ -65,7 +65,7 @@ def main():
     if not _wait_healthy():
         sys.exit("[launch] server did not become healthy in time")
 
-    token = os.getenv("NGROK_TOKEN", "3GoR6mDF12LKEfUuLwhSEXew3HQ_5YarjvjWLKfJCyBaLJ9xm").strip()
+    token = os.getenv("NGROK_TOKEN", "").strip()
     proc = None
     if token:
         # ngrok has no ~100s response cap (unlike a Cloudflare quick tunnel), so
