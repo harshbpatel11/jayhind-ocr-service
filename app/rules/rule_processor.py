@@ -31,6 +31,24 @@ _DATE_LABEL_RE = re.compile(
     r"([0-9]{1,2}[/\-. ][A-Za-z0-9]{2,9}[/\-. ][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})",
     re.IGNORECASE,
 )
+# An explicit due date, e.g. "Due Date: 12/08/2026" — deliberately distinct from
+# the days-count pattern below, so "Payment Due: 30 Days" never gets mistaken for
+# a date (this only matches a date-shaped token, that one only a number of days).
+_DUE_DATE_LABEL_RE = re.compile(
+    r"(?:due\s*date|payment\s*due\s*(?:on|date)?|due\s*on|due\s*by)\s*[:\-]?\s*"
+    r"([0-9]{1,2}[/\-. ][A-Za-z0-9]{2,9}[/\-. ][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})",
+    re.IGNORECASE,
+)
+# Credit-period length in days, e.g. "Payment Due: 30 Days", "Due in 45 days",
+# "Terms: 30 Days" — the "days" word is required so this never fires on an
+# unrelated number after the label.
+_PAYMENT_TERMS_DAYS_RE = re.compile(
+    r"(?:payment\s*due|due\s*in|credit\s*period|terms?)\s*[:\-]?\s*(\d{1,3})\s*days?",
+    re.IGNORECASE,
+)
+# "Net 30" / "Net45" — a standalone convention that already means N days, no
+# "days" word printed.
+_NET_TERMS_RE = re.compile(r"\bnet\s*[:\-]?\s*(\d{1,3})\b", re.IGNORECASE)
 _PINCODE_RE = re.compile(r"\b([1-9][0-9]{5})\b")
 _HSN_RE = re.compile(r"(?:hsn|sac)\s*(?:code)?\s*[:\-]?\s*([0-9]{4,8})", re.IGNORECASE)
 _GRAND_TOTAL_RE = re.compile(
@@ -53,6 +71,10 @@ class RuleProcessorImpl(RuleProcessor):
         hints.gstins = gst.find_gstins(reader_output.markdown + "\n" + text)
         hints.invoice_number = _first_group(_INVOICE_NO_RE, text)
         hints.invoice_date = normalize_date(_first_group(_DATE_LABEL_RE, text))
+        hints.due_date = normalize_date(_first_group(_DUE_DATE_LABEL_RE, text))
+        hints.payment_terms_days = _first_int(_PAYMENT_TERMS_DAYS_RE, text)
+        if hints.payment_terms_days is None:
+            hints.payment_terms_days = _first_int(_NET_TERMS_RE, text)
         hints.pincodes = _unique(_PINCODE_RE.findall(text))
         hints.hsn_codes = _unique(m for m in _HSN_RE.findall(text))
         hints.grand_total = _max_money(_GRAND_TOTAL_RE.findall(text))
@@ -69,6 +91,11 @@ class RuleProcessorImpl(RuleProcessor):
 def _first_group(pattern: re.Pattern[str], text: str) -> str | None:
     match = pattern.search(text or "")
     return match.group(1).strip() if match else None
+
+
+def _first_int(pattern: re.Pattern[str], text: str) -> int | None:
+    match = pattern.search(text or "")
+    return int(match.group(1)) if match else None
 
 
 def _unique(values) -> list[str]:

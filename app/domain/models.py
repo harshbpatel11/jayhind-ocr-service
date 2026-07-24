@@ -93,6 +93,11 @@ class InvoiceMeta(_Contract):
 
     number: str = ""
     date: str | None = None
+    #: Explicit payment-due date if printed ("YYYY-MM-DD"), else derived from
+    #: ``date + paymentTermsDays`` when both are known, else null.
+    due_date: str | None = None
+    #: Credit-period length in days read from text like "Net 30" / "Payment Due: 30 Days".
+    payment_terms_days: int | None = None
 
 
 class ExtractedInvoice(_Contract):

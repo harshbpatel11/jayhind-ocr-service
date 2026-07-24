@@ -34,7 +34,7 @@ from app.domain.models import (
 )
 from app.domain.pipeline_types import ExtractionContext
 from app.rules import gst
-from app.rules.dates import normalize_date
+from app.rules.dates import add_days, normalize_date
 from app.utils.numeric import digits_only, round2, to_float, to_money
 
 
@@ -247,7 +247,17 @@ class InvoiceValidatorImpl(InvoiceValidator):
     def _invoice_meta(self, data: dict, context: ExtractionContext) -> InvoiceMeta:
         number = _clean_str(_pick(data, "number", "invoiceNumber", "no")) or context.hints.invoice_number or ""
         date_value = normalize_date(_pick(data, "date", "invoiceDate")) or context.hints.invoice_date
-        return InvoiceMeta(number=str(number).strip(), date=date_value)
+
+        terms_days = to_float(_pick(data, "paymentTermsDays", "payment_terms_days"))
+        terms_days_int = int(terms_days) if terms_days is not None else context.hints.payment_terms_days
+
+        due_date = normalize_date(_pick(data, "dueDate", "due_date")) or context.hints.due_date
+        if due_date is None and date_value and terms_days_int is not None:
+            # No due date printed, but the terms give a credit period — derive it
+            # from the invoice date rather than leaving the reviewer to compute it.
+            due_date = add_days(date_value, terms_days_int)
+
+        return InvoiceMeta(number=str(number).strip(), date=date_value, due_date=due_date, payment_terms_days=terms_days_int)
 
 
 # -- HSN/SAC backfill ---------------------------------------------------------

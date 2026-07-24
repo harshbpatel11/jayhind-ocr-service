@@ -29,7 +29,7 @@ Return ONE JSON object with EXACTLY these keys (no extra keys, no comments):
 {
  "seller": {"name","address","gstin","phone","email","pincode"},
  "buyer":  {"name","address","gstin","phone","email","pincode"},
- "invoice": {"number","date"},
+ "invoice": {"number","date","dueDate","paymentTermsDays"},
  "lineItems": [{"description","hsnSac","quantity","unit","rate","discount",
                 "taxableAmount","gstRate","cgstAmount","sgstAmount","igstAmount","lineTotal"}],
  "taxSummary": [{"rate","taxableAmount","cgst","sgst","igst"}],
@@ -39,6 +39,7 @@ Rules:
 - seller = the SUPPLIER / issuer (From / Sold By / seller GSTIN). buyer = the recipient (Bill To / Ship To).
 - Money = plain numbers with 2 decimals (no currency symbol, no commas). Percentages = plain numbers (e.g. 18).
 - date = "YYYY-MM-DD" (Indian invoices are day-first, e.g. 03/04/2026 = 2026-04-03) or null. Anything unknown = null.
+- dueDate = the explicit payment-due date if printed ("YYYY-MM-DD"), else null (do not guess one). paymentTermsDays = the credit period in days if printed as text like "Net 30" or "Payment Due: 30 Days" (a plain integer), else null.
 - hsnSac = the line's HSN or SAC code — a 4/6/8-digit number, usually the column right after the description. Copy it for EVERY line that shows one; never leave it out.
 - taxableAmount = the taxable value of the line AFTER any discount. gstRate = the total GST percent on the line.
 - Intra-state (seller & buyer GSTIN state codes equal) -> fill cgstAmount + sgstAmount, set igstAmount null.
@@ -58,6 +59,10 @@ def _hint_block(hints: RuleHints) -> str:
         lines.append(f"- Invoice number likely: {hints.invoice_number}")
     if hints.invoice_date:
         lines.append(f"- Invoice date likely: {hints.invoice_date}")
+    if hints.due_date:
+        lines.append(f"- Due date likely: {hints.due_date}")
+    if hints.payment_terms_days is not None:
+        lines.append(f"- Payment terms likely: Net {hints.payment_terms_days} days")
     if hints.hsn_codes:
         lines.append(f"- HSN/SAC codes on the document: {', '.join(hints.hsn_codes)}")
     if hints.grand_total:
@@ -133,7 +138,12 @@ def build_json_schema() -> dict:
             "buyer": _party_schema(),
             "invoice": {
                 "type": "object",
-                "properties": {"number": {"type": ["string", "null"]}, "date": {"type": ["string", "null"]}},
+                "properties": {
+                    "number": {"type": ["string", "null"]},
+                    "date": {"type": ["string", "null"]},
+                    "dueDate": {"type": ["string", "null"]},
+                    "paymentTermsDays": number_or_null,
+                },
             },
             "lineItems": {"type": "array", "items": line_item},
             "taxSummary": {"type": "array", "items": tax_slab},

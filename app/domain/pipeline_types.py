@@ -168,6 +168,10 @@ class RuleHints:
     gstins: list[str] = field(default_factory=list)
     invoice_number: str | None = None
     invoice_date: str | None = None
+    #: Explicit due date printed on the document (``YYYY-MM-DD``), e.g. "Due Date: 12/08/2026".
+    due_date: str | None = None
+    #: Credit-period length in days, e.g. from "Net 30" / "Payment Due: 30 Days".
+    payment_terms_days: int | None = None
     pincodes: list[str] = field(default_factory=list)
     hsn_codes: list[str] = field(default_factory=list)
     amounts: list[float] = field(default_factory=list)

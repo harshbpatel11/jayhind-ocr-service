@@ -28,3 +28,21 @@ def test_finds_line_item_table():
     # header + 2 rows
     assert len(hints.line_item_rows) == 3
     assert "Description" in (hints.extra.get("lineItemColumns") or [])
+
+
+def test_extracts_explicit_due_date():
+    hints = _hints(SAMPLE_MARKDOWN_INTRASTATE + "\nDue Date: 15/05/2026\n")
+    assert hints.due_date == "2026-05-15"
+    assert hints.payment_terms_days is None
+
+
+def test_extracts_payment_terms_days_without_a_date():
+    # "Payment Due: 30 Days" must NOT be mistaken for a date — only the days count.
+    hints = _hints(SAMPLE_MARKDOWN_INTRASTATE + "\nPayment Due: 30 Days\n")
+    assert hints.payment_terms_days == 30
+    assert hints.due_date is None
+
+
+def test_extracts_net_terms():
+    hints = _hints(SAMPLE_MARKDOWN_INTRASTATE + "\nTerms: Net 45\n")
+    assert hints.payment_terms_days == 45

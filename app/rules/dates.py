@@ -9,7 +9,7 @@ the reviewer rather than being guessed).
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, timedelta
 
 _MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -57,3 +57,12 @@ def normalize_date(value: str | None) -> str | None:
             day, month = month, day
         return _safe(year, month, day)
     return None
+
+
+def add_days(iso_date: str, days: int) -> str | None:
+    """``YYYY-MM-DD`` + a day count -> ``YYYY-MM-DD``, or ``None`` if unparseable."""
+    iso = _ISO_RE.search(iso_date or "")
+    if not iso:
+        return None
+    base = date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
+    return (base + timedelta(days=days)).isoformat()

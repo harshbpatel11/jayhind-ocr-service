@@ -133,3 +133,36 @@ def test_empty_payload_still_contract_shaped():
     assert inv.schema_version == 1
     assert inv.line_items == []
     assert inv.totals.grand_total == 0.0
+
+
+def test_due_date_derived_from_invoice_date_and_terms_days():
+    # "Payment Due: 30 Days" (paymentTermsDays only) → dueDate = invoice date + 30.
+    payload = {**BASE, "invoice": {"number": "INV-2026-0042", "date": "03/04/2026", "paymentTermsDays": 30}}
+    inv = _validator().validate(payload, _ctx())
+    assert inv.invoice.payment_terms_days == 30
+    assert inv.invoice.due_date == "2026-05-03"
+
+
+def test_explicit_due_date_wins_over_derivation():
+    payload = {
+        **BASE,
+        "invoice": {"number": "INV-2026-0042", "date": "03/04/2026", "dueDate": "2026-06-01", "paymentTermsDays": 30},
+    }
+    inv = _validator().validate(payload, _ctx())
+    assert inv.invoice.due_date == "2026-06-01"
+
+
+def test_due_date_falls_back_to_hints_when_model_leaves_it_blank():
+    reader = ReaderOutput(pages=[], markdown="", text="", engine="fake")
+    hints = RuleHints(due_date="2026-05-20", payment_terms_days=15)
+    ctx = ExtractionContext(reader=reader, hints=hints, method="ocr", page_count=1)
+    inv = _validator().validate(BASE, ctx)
+    assert inv.invoice.due_date == "2026-05-20"
+    assert inv.invoice.payment_terms_days == 15
+
+
+def test_no_due_date_without_terms_or_invoice_date():
+    payload = {**BASE, "invoice": {"number": "INV-2026-0042", "date": None}}
+    inv = _validator().validate(payload, _ctx())
+    assert inv.invoice.due_date is None
+    assert inv.invoice.payment_terms_days is None
